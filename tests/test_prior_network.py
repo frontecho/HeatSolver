@@ -83,7 +83,7 @@ class PriorParameterModelTest(unittest.TestCase):
         out = model(torch.randn(1, 2, 3, 4))
         solver, _ = make_solver(ny=3, nx=4, nz=5)
         _, _, _, decoded = model.decode_configured_parameter_fields(solver, out, T_ref=1300.0, dtype=torch.float64, device=torch.device("cpu"))
-        expected_property_params = len(THERMAL_LAYER_NAMES) * 3 * 4
+        expected_property_params = len(THERMAL_LAYER_NAMES) + len(THERMAL_LAYER_NAMES) * 3 * 4
         expected_theta_dim = 3 * 4 + 2 * expected_property_params
 
         self.assertEqual(decoded["T_bot_delta"].shape, (3, 4))
@@ -114,7 +114,7 @@ class PriorParameterModelTest(unittest.TestCase):
         out = model(torch.randn(1, 2, 3, 4))
         solver, _ = make_solver(ny=3, nx=4, nz=5)
         _, _, _, decoded = model.decode_configured_parameter_fields(solver, out, T_ref=1300.0, dtype=torch.float64, device=torch.device("cpu"))
-        expected_property_params = len(THERMAL_LAYER_NAMES) * 4
+        expected_property_params = len(THERMAL_LAYER_NAMES) + len(THERMAL_LAYER_NAMES) * 4
         expected_theta_dim = 4 + 2 * expected_property_params
         self.assertEqual(decoded["T_bot_delta"].shape, (3, 4))
         self.assertEqual(decoded["K_log_xy"].shape, (len(THERMAL_LAYER_NAMES), 3, 4))
@@ -141,7 +141,7 @@ class PriorParameterModelTest(unittest.TestCase):
         out = model(torch.randn(1, 2, 3, 4))
         solver, _ = make_solver(ny=3, nx=4, nz=5)
         _, _, _, decoded = model.decode_configured_parameter_fields(solver, out, T_ref=1300.0, dtype=torch.float64, device=torch.device("cpu"))
-        expected_property_params = len(THERMAL_LAYER_NAMES) * 4
+        expected_property_params = len(THERMAL_LAYER_NAMES) + len(THERMAL_LAYER_NAMES) * 4
         expected_theta_dim = 4 + expected_property_params
 
         self.assertEqual(decoded["K_log_xy"].shape, (len(THERMAL_LAYER_NAMES), 3, 4))
@@ -169,7 +169,7 @@ class PriorParameterModelTest(unittest.TestCase):
         out = model(torch.randn(1, 2, 3, 4))
         solver, _ = make_solver(ny=3, nx=4, nz=5)
         _, _, _, decoded = model.decode_configured_parameter_fields(solver, out, T_ref=1300.0, dtype=torch.float64, device=torch.device("cpu"))
-        expected_property_params = len(THERMAL_LAYER_NAMES) * 4
+        expected_property_params = len(THERMAL_LAYER_NAMES) + len(THERMAL_LAYER_NAMES) * 4
         expected_theta_dim = 4 + expected_property_params
 
         self.assertEqual(decoded["K_log_xy"].shape, (len(THERMAL_LAYER_NAMES), 3, 4))
@@ -179,6 +179,26 @@ class PriorParameterModelTest(unittest.TestCase):
         self.assertEqual(out["K_coeff"].numel(), 0)
         self.assertEqual(out["A_coeff"].numel(), expected_property_params)
         self.assert_decoded_keys_absent(out)
+
+    def test_checkpoint_relevant_property_parameter_counts(self) -> None:
+        model = PriorParameterModel(
+            10,
+            10,
+            in_channels=2,
+            bottom_x=3,
+            bottom_y=3,
+            k_property_x=6,
+            k_property_y=6,
+            a_property_x=8,
+            a_property_y=8,
+            width=32,
+            k_mode="dct",
+            a_mode="dct",
+        )
+        self.assertEqual(model.n_k_params, 185)
+        self.assertEqual(model.n_a_params, 325)
+        self.assertEqual(model.theta_dim, model.n_bottom_field + 185 + 325)
+        self.assertEqual(model.prior_net.head[-1].weight.shape, (model.theta_dim, 128))
 
 
 if __name__ == "__main__":

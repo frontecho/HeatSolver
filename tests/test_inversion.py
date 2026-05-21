@@ -28,6 +28,19 @@ class InversionHelperTest(unittest.TestCase):
             _build_optimizer("sgd", [param], lr=0.1, weight_decay=0.0)
 
 
+class FixedCoeffDirectModel(DirectParameterModel):
+    def __init__(self, ny: int, nx: int, bottom_coeff: torch.Tensor) -> None:
+        super().__init__(ny, nx, bottom_x=bottom_coeff.numel(), bottom_y=1, bottom_mode="dct", k_mode="fixed", a_mode="fixed")
+        self.fixed_bottom_coeff = bottom_coeff.to(dtype=torch.float64)
+
+    def forward(self, features: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        return {
+            "bottom_coeff": self.fixed_bottom_coeff,
+            "K_coeff": self._scaled_coeff(self.k_mode, None, self.k_property_scale, "K"),
+            "A_coeff": self._scaled_coeff(self.a_mode, None, self.a_property_scale, "A"),
+        }
+
+
 class RunInversionTest(unittest.TestCase):
     def test_no_valid_observations_raise(self) -> None:
         solver, _ = make_solver(ny=2, nx=2, nz=4)
@@ -49,6 +62,29 @@ class RunInversionTest(unittest.TestCase):
         self.assertEqual(out["T"].shape, (2, 2, 4))
         self.assertEqual(out["q_pred"].shape, (2, 2))
         self.assertNotIn("parameterization", out)
+
+    def test_rejects_negative_coefficient_regularization_weights(self) -> None:
+        solver, _ = make_solver(ny=2, nx=2, nz=4)
+        model = DirectParameterModel(2, 2, bottom_mode="fixed", k_mode="fixed", a_mode="fixed")
+        with self.assertRaises(ValueError):
+            run_inversion(solver, np.ones((2, 2)), model, lam_alpha=-1.0, verbose=False)
+
+    def test_coefficient_regularization_contributes_to_loss(self) -> None:
+        solver, T_bot = make_solver(ny=2, nx=2, nz=4, bottom_temp=500.0)
+        baseline_T = solver.solve(T_bot)
+        q_obs = solver.surface_heat_flow_upward_np(baseline_T)
+        solver.clear_warm_start()
+        bottom_coeff = torch.tensor([2.0], dtype=torch.float64)
+        model = FixedCoeffDirectModel(2, 2, bottom_coeff)
+        out = run_inversion(solver, q_obs, model, T_ref=500.0, steps=0, optimizer_name="adamw", lam_alpha=3.0, verbose=False)
+        row = out["history"][-1]
+
+        self.assertAlmostEqual(row["alpha_reg"], 0.5 * 3.0 * 4.0)
+        self.assertAlmostEqual(row["coeff_reg"], row["alpha_reg"])
+        self.assertAlmostEqual(row["loss"], row["data_misfit"] + row["moment"] + row["coeff_reg"])
+        self.assertEqual(out["lam_alpha"], 3.0)
+        self.assertEqual(out["lam_k"], 0.0)
+        self.assertEqual(out["lam_a"], 0.0)
 
     def test_one_step_adamw_direct_dct_bottom(self) -> None:
         solver, T_bot = make_solver(ny=2, nx=2, nz=4, bottom_temp=500.0)

@@ -70,9 +70,9 @@ class PriorParameterModel(ParameterModelBase):
         self.uses_a_property_mode = self.a_mode in ("dct", "full")
         self.theta_dim = self.n_bottom_field
         if self.uses_k_property_mode:
-            self.theta_dim += self.n_k_field
+            self.theta_dim += self.n_k_params
         if self.uses_a_property_mode:
-            self.theta_dim += self.n_a_field
+            self.theta_dim += self.n_a_params
         self.prior_net = MultiSourcePriorNet(in_channels, self.theta_dim, width=width)
 
     def forward(self, features: torch.Tensor | None = None) -> dict[str, torch.Tensor | None]:
@@ -86,10 +86,10 @@ class PriorParameterModel(ParameterModelBase):
         A_raw = None
 
         if self.uses_k_property_mode:
-            K_raw = theta_raw[cursor : cursor + self.n_k_field]
-            cursor += self.n_k_field
+            K_raw = theta_raw[cursor : cursor + self.n_k_params]
+            cursor += self.n_k_params
         if self.uses_a_property_mode:
-            A_raw = theta_raw[cursor : cursor + self.n_a_field]
+            A_raw = theta_raw[cursor : cursor + self.n_a_params]
         return {
             "bottom_coeff": self._scaled_coeff(self.bottom_mode, bottom_raw, self.alpha_scale, "bottom"),
             "K_coeff": self._scaled_coeff(self.k_mode, K_raw, self.k_property_scale, "K"),

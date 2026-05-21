@@ -96,6 +96,9 @@ def run_inversion(
     early_stop_metric: str = "loss",
     lam_q_mean: float = 0.0,
     lam_q_std: float = 0.0,
+    lam_alpha: float = 0.0,
+    lam_k: float = 0.0,
+    lam_a: float = 0.0,
     verbose: bool = True,
 ) -> dict[str, Any]:
     if early_stop_patience < 0:
@@ -104,6 +107,8 @@ def run_inversion(
         raise ValueError("early_stop_min_delta must be non-negative.")
     if lam_q_mean < 0.0 or lam_q_std < 0.0:
         raise ValueError("lam_q_mean and lam_q_std must be non-negative.")
+    if lam_alpha < 0.0 or lam_k < 0.0 or lam_a < 0.0:
+        raise ValueError("lam_alpha, lam_k, and lam_a must be non-negative.")
 
     valid = np.isfinite(q_obs)
     if not np.any(valid):
@@ -139,6 +144,11 @@ def run_inversion(
 
     def copy_model_state() -> dict[str, torch.Tensor]:
         return {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+
+    def coeff_l2(coeff: torch.Tensor, lam: float) -> torch.Tensor:
+        if lam == 0.0 or coeff.numel() == 0:
+            return torch.zeros((), dtype=dtype, device=device)
+        return 0.5 * lam * torch.mean(coeff * coeff)
 
     def forward_state() -> tuple[
         dict[str, torch.Tensor],
@@ -176,7 +186,11 @@ def run_inversion(
         moment_mean = 0.5 * lam_q_mean * (q_pred_mean - q_obs_mean_t) * (q_pred_mean - q_obs_mean_t)
         moment_std = 0.5 * lam_q_std * (q_pred_std - q_obs_std_t) * (q_pred_std - q_obs_std_t)
         moment = moment_mean + moment_std
-        loss = data_misfit + moment
+        alpha_reg = coeff_l2(coeffs["bottom_coeff"], lam_alpha)
+        K_reg = coeff_l2(coeffs["K_coeff"], lam_k)
+        A_reg = coeff_l2(coeffs["A_coeff"], lam_a)
+        coeff_reg = alpha_reg + K_reg + A_reg
+        loss = data_misfit + moment + coeff_reg
         metrics = {
             "loss": float(loss.detach().cpu()),
             "data_misfit": float(data_misfit.detach().cpu()),
@@ -184,6 +198,10 @@ def run_inversion(
             "moment": float(moment.detach().cpu()),
             "moment_mean": float(moment_mean.detach().cpu()),
             "moment_std": float(moment_std.detach().cpu()),
+            "coeff_reg": float(coeff_reg.detach().cpu()),
+            "alpha_reg": float(alpha_reg.detach().cpu()),
+            "K_reg": float(K_reg.detach().cpu()),
+            "A_reg": float(A_reg.detach().cpu()),
             "q_pred_mean_obs_points": float(q_pred_mean.detach().cpu()),
             "q_pred_std_obs_points": float(q_pred_std.detach().cpu()),
             "q_obs_mean_obs_points": float(q_obs_mean_t.detach().cpu()),
@@ -229,13 +247,22 @@ def run_inversion(
         final_metrics = metrics
         solve_info = solver.last_solve_info or {}
         bottom_coeff = coeffs["bottom_coeff"]
+        T_bot_delta = decoded["T_bot_delta"]
         K_log_xy = decoded["K_log_xy"]
         A_log_xy = decoded["A_log_xy"]
+        K_multiplier = torch.exp(K_log_xy) if isinstance(K_log_xy, torch.Tensor) and K_log_xy.numel() > 0 else None
+        A_multiplier = torch.exp(A_log_xy) if isinstance(A_log_xy, torch.Tensor) and A_log_xy.numel() > 0 else None
         row = {
             "step": float(step),
             "alpha_norm": float(torch.linalg.vector_norm(bottom_coeff).detach().cpu()) if bottom_coeff.numel() > 0 else 0.0,
+            "T_bot_delta_min": float(torch.min(T_bot_delta).detach().cpu()) if isinstance(T_bot_delta, torch.Tensor) and T_bot_delta.numel() > 0 else 0.0,
+            "T_bot_delta_max": float(torch.max(T_bot_delta).detach().cpu()) if isinstance(T_bot_delta, torch.Tensor) and T_bot_delta.numel() > 0 else 0.0,
             "K_log_maxabs": float(torch.max(torch.abs(K_log_xy)).detach().cpu()) if isinstance(K_log_xy, torch.Tensor) and K_log_xy.numel() > 0 else 0.0,
+            "K_multiplier_min": float(torch.min(K_multiplier).detach().cpu()) if K_multiplier is not None else 1.0,
+            "K_multiplier_max": float(torch.max(K_multiplier).detach().cpu()) if K_multiplier is not None else 1.0,
             "A_log_maxabs": float(torch.max(torch.abs(A_log_xy)).detach().cpu()) if isinstance(A_log_xy, torch.Tensor) and A_log_xy.numel() > 0 else 0.0,
+            "A_multiplier_min": float(torch.min(A_multiplier).detach().cpu()) if A_multiplier is not None else 1.0,
+            "A_multiplier_max": float(torch.max(A_multiplier).detach().cpu()) if A_multiplier is not None else 1.0,
             "closure_calls": float(closure_calls),
             "picard_iters": float(solve_info.get("picard_iters", float("nan"))),
             "cg_iters_total": float(solve_info.get("cg_iters_total", float("nan"))),
@@ -250,12 +277,10 @@ def run_inversion(
                 f"rmse={row['rmse']:.3f} "
                 f"data={row['data_misfit']:.6e} "
                 f"moment={row['moment']:.6e} "
-                f"|alpha|={row['alpha_norm']:.3f} "
-                f"max|K_log|={row['K_log_maxabs']:.3f} "
-                f"max|A_log|={row['A_log_maxabs']:.3f} "
-                f"picard={int(row['picard_iters']) if np.isfinite(row['picard_iters']) else -1} "
-                f"cg={int(row['cg_iters_total']) if np.isfinite(row['cg_iters_total']) else -1} "
-                f"closures={int(row['closure_calls'])}"
+                f"reg={row['coeff_reg']:.6e} "
+                f"Tbot+=[{row['T_bot_delta_min']:.1f},{row['T_bot_delta_max']:.1f}] "
+                f"K×=[{row['K_multiplier_min']:.2f},{row['K_multiplier_max']:.2f}] "
+                f"A×=[{row['A_multiplier_min']:.2f},{row['A_multiplier_max']:.2f}]"
             )
             if diagnose_gradients:
                 message += (
@@ -359,6 +384,9 @@ def run_inversion(
         "final_rmse": final_metrics["rmse"] if final_metrics is not None else (history[-1]["rmse"] if history else float("nan")),
         "lam_q_mean": lam_q_mean,
         "lam_q_std": lam_q_std,
+        "lam_alpha": lam_alpha,
+        "lam_k": lam_k,
+        "lam_a": lam_a,
     }
 
 
@@ -397,6 +425,9 @@ def main() -> None:
     parser.add_argument("--early-stop-metric", type=str, default="loss")
     parser.add_argument("--lam-q-mean", type=float, default=0.0)
     parser.add_argument("--lam-q-std", type=float, default=0.0)
+    parser.add_argument("--lam-alpha", type=float, default=0.0)
+    parser.add_argument("--lam-k", type=float, default=0.0)
+    parser.add_argument("--lam-a", type=float, default=0.0)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--output-prefix", type=str, default=None)
@@ -523,6 +554,9 @@ def main() -> None:
         early_stop_metric=args.early_stop_metric,
         lam_q_mean=args.lam_q_mean,
         lam_q_std=args.lam_q_std,
+        lam_alpha=args.lam_alpha,
+        lam_k=args.lam_k,
+        lam_a=args.lam_a,
         verbose=not args.quiet,
     )
 
@@ -572,6 +606,9 @@ def main() -> None:
             "diagnose_gradients": args.diagnose_gradients,
             "lam_q_mean": args.lam_q_mean,
             "lam_q_std": args.lam_q_std,
+            "lam_alpha": args.lam_alpha,
+            "lam_k": args.lam_k,
+            "lam_a": args.lam_a,
             "early_stop": args.early_stop,
             "early_stop_patience": early_stop_patience,
             "early_stop_min_delta": args.early_stop_min_delta,
@@ -609,6 +646,9 @@ def main() -> None:
         "loss_options": {
             "lam_q_mean": out["lam_q_mean"],
             "lam_q_std": out["lam_q_std"],
+            "lam_alpha": out["lam_alpha"],
+            "lam_k": out["lam_k"],
+            "lam_a": out["lam_a"],
         },
         "model_config": model_config,
     }

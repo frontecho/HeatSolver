@@ -34,11 +34,13 @@ class DirectParameterModelTest(unittest.TestCase):
         dct_out = dct()
         solver, _ = make_solver(ny=2, nx=3)
         _, _, _, decoded = dct.decode_configured_parameter_fields(solver, dct_out, T_ref=1300.0, dtype=torch.float64, device=torch.device("cpu"))
+        expected_dct_property_params = len(THERMAL_LAYER_NAMES) + len(THERMAL_LAYER_NAMES) * dct.k_dct.y * dct.k_dct.x
         self.assertEqual(decoded["K_log_xy"].shape, (len(THERMAL_LAYER_NAMES), 2, 3))
         self.assertEqual(dct.bottom_dct.n_params, 4)
         self.assertEqual(dct.alpha_scale, 200.0)
         self.assertGreater(float(torch.max(torch.abs(decoded["T_bot_delta"])).detach()), 1.0)
-        self.assertGreater(dct_out["K_coeff"].numel(), 0)
+        self.assertEqual(dct_out["K_coeff"].numel(), expected_dct_property_params)
+        self.assertEqual(dct_out["A_coeff"].numel(), expected_dct_property_params)
         self.assert_decoded_keys_absent(dct_out)
 
         full = DirectParameterModel(2, 3, bottom_mode="full", k_mode="full", a_mode="full", alpha_scale=150.0)
@@ -48,17 +50,29 @@ class DirectParameterModelTest(unittest.TestCase):
         _, _, _, decoded = full.decode_configured_parameter_fields(solver, full_out, T_ref=1300.0, dtype=torch.float64, device=torch.device("cpu"))
         self.assertEqual(decoded["T_bot_delta"].shape, (2, 3))
         self.assertAlmostEqual(float(torch.max(decoded["T_bot_delta"]).detach()), 150.0 * np.tanh(1.0))
+        expected_full_property_params = len(THERMAL_LAYER_NAMES) + len(THERMAL_LAYER_NAMES) * 2 * 3
         self.assertEqual(decoded["K_log_xy"].shape, (len(THERMAL_LAYER_NAMES), 2, 3))
-        self.assertEqual(full_out["K_coeff"].numel(), len(THERMAL_LAYER_NAMES) * 2 * 3)
-        self.assertEqual(full_out["A_coeff"].numel(), len(THERMAL_LAYER_NAMES) * 2 * 3)
+        self.assertEqual(full_out["K_coeff"].numel(), expected_full_property_params)
+        self.assertEqual(full_out["A_coeff"].numel(), expected_full_property_params)
         self.assertEqual(full.raw_bottom_field.numel(), 6)
         self.assert_decoded_keys_absent(full_out)
 
     def test_full_property_modes_do_not_require_nz(self) -> None:
         model = DirectParameterModel(2, 2, k_mode="full", a_mode="full")
         out = model()
-        self.assertEqual(out["K_coeff"].numel(), len(THERMAL_LAYER_NAMES) * 2 * 2)
-        self.assertEqual(out["A_coeff"].numel(), len(THERMAL_LAYER_NAMES) * 2 * 2)
+        expected_property_params = len(THERMAL_LAYER_NAMES) + len(THERMAL_LAYER_NAMES) * 2 * 2
+        self.assertEqual(out["K_coeff"].numel(), expected_property_params)
+        self.assertEqual(out["A_coeff"].numel(), expected_property_params)
+
+    def test_property_mean_and_field_terms_share_tanh_scaling(self) -> None:
+        model = DirectParameterModel(2, 2, k_mode="dct", a_mode="fixed", k_property_x=1, k_property_y=1, k_property_scale=0.5)
+        model.raw_K_field.data.zero_()
+        model.raw_K_field.data[0] = 1.0
+        model.raw_K_field.data[len(THERMAL_LAYER_NAMES)] = -2.0
+        out = model()
+
+        self.assertAlmostEqual(float(out["K_coeff"][0].detach()), 0.5 * np.tanh(1.0))
+        self.assertAlmostEqual(float(out["K_coeff"][len(THERMAL_LAYER_NAMES)].detach()), 0.5 * np.tanh(-2.0))
 
 
 if __name__ == "__main__":

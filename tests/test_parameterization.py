@@ -178,6 +178,39 @@ class DecodeConfiguredParameterFieldsTest(unittest.TestCase):
         self.assertEqual(extras["K_log_xy"].shape, (len(THERMAL_LAYER_NAMES), 2, 2))
         self.assertEqual(extras["A_log_xy"].shape, (len(THERMAL_LAYER_NAMES), 2, 2))
 
+    def test_decodes_property_mean_plus_field_terms(self) -> None:
+        solver, _ = make_solver(ny=2, nx=2, nz=5)
+        model = DirectParameterModel(
+            2,
+            2,
+            bottom_mode="fixed",
+            k_mode="dct",
+            a_mode="full",
+            k_property_x=1,
+            k_property_y=1,
+        )
+        k_mean = torch.linspace(0.1, 0.5, len(THERMAL_LAYER_NAMES), dtype=torch.float64)
+        k_field_coeff = torch.arange(model.n_k_field, dtype=torch.float64) / 10.0
+        a_mean = torch.linspace(-0.5, -0.1, len(THERMAL_LAYER_NAMES), dtype=torch.float64)
+        a_field = torch.arange(model.n_a_field, dtype=torch.float64).reshape(len(THERMAL_LAYER_NAMES), 2, 2) / 20.0
+        coeffs = {
+            "bottom_coeff": torch.zeros(0, dtype=torch.float64),
+            "K_coeff": torch.cat([k_mean, k_field_coeff]),
+            "A_coeff": torch.cat([a_mean, a_field.reshape(-1)]),
+        }
+        _, _, _, extras = model.decode_configured_parameter_fields(
+            solver,
+            coeffs,
+            T_ref=1300.0,
+            dtype=torch.float64,
+            device=torch.device("cpu"),
+        )
+        expected_k_field = model.k_dct.decode_torch(k_field_coeff, dtype=torch.float64, device=torch.device("cpu"))
+        expected_a_field = a_field
+
+        torch.testing.assert_close(extras["K_log_xy"], k_mean[:, None, None] + expected_k_field)
+        torch.testing.assert_close(extras["A_log_xy"], a_mean[:, None, None] + expected_a_field)
+
 
 if __name__ == "__main__":
     unittest.main()

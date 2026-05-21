@@ -13,8 +13,8 @@ class DirectParameterModel(ParameterModelBase):
         super().__init__(ny, nx, **kwargs)
 
         self.raw_bottom_field = self._make_raw_field_parameter(self.bottom_mode, self.n_bottom_field, (ny, nx))
-        self.raw_K_field = self._make_raw_field_parameter(self.k_mode, self.n_k_field)
-        self.raw_A_field = self._make_raw_field_parameter(self.a_mode, self.n_a_field)
+        self.raw_K_field = self._make_raw_field_parameter(self.k_mode, self.n_k_params)
+        self.raw_A_field = self._make_raw_field_parameter(self.a_mode, self.n_a_params)
 
     def _make_raw_field_parameter(self, mode: str, n_params: int, full_shape: tuple[int, ...] | None = None) -> nn.Parameter | None:
         if mode == "fixed":

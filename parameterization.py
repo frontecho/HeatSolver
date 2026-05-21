@@ -92,6 +92,10 @@ class ParameterModelBase(nn.Module):
         self.n_bottom_field = self._field_param_count(self.bottom_mode, self.bottom_dct, 1, "bottom")
         self.n_k_field = self._field_param_count(self.k_mode, self.k_dct, self.n_property_layers, "K")
         self.n_a_field = self._field_param_count(self.a_mode, self.a_dct, self.n_property_layers, "A")
+        self.n_k_mean = self.n_property_layers if self.k_mode != "fixed" else 0
+        self.n_a_mean = self.n_property_layers if self.a_mode != "fixed" else 0
+        self.n_k_params = self.n_k_mean + self.n_k_field
+        self.n_a_params = self.n_a_mean + self.n_a_field
 
     def _field_param_count(self, mode: str, dct: LayeredDCTField | None, n_layers: int, name: str) -> int:
         if mode == "fixed":
@@ -133,6 +137,32 @@ class ParameterModelBase(nn.Module):
             raise ValueError("DCT mode is missing its DCT field.")
         return dct.decode_torch(coeff, dtype=dtype, device=device)
 
+    def _decode_property_log_xy(
+        self,
+        mode: str,
+        dct: LayeredDCTField | None,
+        coeff: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        zero_shape = (self.n_property_layers, self.ny, self.nx)
+        if mode == "fixed":
+            return torch.zeros(zero_shape, dtype=dtype, device=device)
+        coeff = coeff.to(dtype=dtype, device=device)
+        mean = coeff[: self.n_property_layers]
+        field_coeff = coeff[self.n_property_layers :]
+        field_xy = self._decode_coeff(
+            mode,
+            dct,
+            field_coeff,
+            zero_shape,
+            zero_shape,
+            dtype=dtype,
+            device=device,
+        )
+        return mean.reshape(self.n_property_layers, 1, 1) + field_xy
+
     def apply_log_multiplier_torch(
         self,
         solver: Any,
@@ -172,8 +202,8 @@ class ParameterModelBase(nn.Module):
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
         T_bot_delta_layers = self._decode_coeff(self.bottom_mode, self.bottom_dct, coeffs["bottom_coeff"], (1, self.ny, self.nx), (1, self.ny, self.nx), dtype=dtype, device=device)
-        K_log_xy = self._decode_coeff(self.k_mode, self.k_dct, coeffs["K_coeff"], (self.n_property_layers, self.ny, self.nx), (self.n_property_layers, self.ny, self.nx), dtype=dtype, device=device)
-        A_log_xy = self._decode_coeff(self.a_mode, self.a_dct, coeffs["A_coeff"], (self.n_property_layers, self.ny, self.nx), (self.n_property_layers, self.ny, self.nx), dtype=dtype, device=device)
+        K_log_xy = self._decode_property_log_xy(self.k_mode, self.k_dct, coeffs["K_coeff"], dtype=dtype, device=device)
+        A_log_xy = self._decode_property_log_xy(self.a_mode, self.a_dct, coeffs["A_coeff"], dtype=dtype, device=device)
         T_bot_delta = T_bot_delta_layers[0]
         T_bot = torch.full((solver.ny, solver.nx), float(T_ref), dtype=dtype, device=device) if self.bottom_mode == "fixed" else float(T_ref) + T_bot_delta
 
