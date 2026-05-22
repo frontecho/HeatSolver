@@ -8,7 +8,7 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 GRID_FILENAME = "grid_1km.csv"
-LAYER_FILENAME = "grid_1km_layer_synthesis.csv"
+LAYER_FILENAME = "grid_1km_layer.csv"
 STRATUM_FILLED_FILENAME = "grid_1km_stratum_filled.csv"
 THERMAL_PROPERTIES_FILENAME = "thermal_properties.json"
 THERMAL_GRID_FILENAME = "grid_1km_thermal.csv"
@@ -17,13 +17,13 @@ HEATFLOW_FILENAME = "sample_heatflow_processed.csv"
 GEOPHYS_2D_SPECS = [
     ("grid_1km_gebco.csv", ["DEM"]),
     ("grid_1km_egm2008.csv", ["geoid", "vgg"]),
-    ("grid_1km_wgm2012.csv", ["Bouguer", "Freeair", "Isostatic"]),
+    ("grid_1km_wgm2012.csv", ["Bouguer"]),  # "Freeair", "Isostatic"
     ("grid_1km_mag_anomaly.csv", ["WDMAM2"]),
 ]
 SEISMIC_MODEL_FILENAME = "CSRM1.0.csv"
 MT_RESISTIVITY_FILENAME = "NCC.MT.resistivity.csv"
-SEISMIC_DEPTH_BINS_KM = [(0.0, 20.0), (20.0, 60.0), (60.0, 120.0)]
-MT_DEPTH_BINS_KM = [(0.0, 5.0), (5.0, 20.0), (20.0, 60.0)]
+SEISMIC_DEPTH_BINS_KM = [(0.0, 10.0), (10.0, 20.0), (20.0, 50.0), (50.0, 80.0), (80.0, 120.0)]
+MT_DEPTH_BINS_KM = [(0.0, 5.0), (5.0, 20.0), (20.0, 60.0), (60.0, 120.0)]
 
 
 def build_regular_index(grid_csv: Path | str) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

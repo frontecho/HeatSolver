@@ -37,7 +37,7 @@ def build_prior_feature_pack(
 
 
 class MultiSourcePriorNet(nn.Module):
-    def __init__(self, in_channels: int, theta_dim: int, width: int = 32, dropout: float = 0.1) -> None:
+    def __init__(self, in_channels: int, theta_dim: int, width: int = 32, dropout: float = 0.0) -> None:
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Conv2d(in_channels, width, kernel_size=3, padding=1),

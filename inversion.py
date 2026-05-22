@@ -401,6 +401,7 @@ def main() -> None:
     parser.add_argument("--stride", type=int, default=20)
     parser.add_argument("--dz-km", type=float, default=2.0)
     parser.add_argument("--z-max-km", type=float, default=120.0)
+    parser.add_argument("--t-ref", type=float, default=1300.0, help="Reference bottom temperature used for fixed bottom mode and DCT deltas.")
     parser.add_argument("--layer-transition-xy-km", type=float, default=20.0)
     parser.add_argument("--layer-transition-z-km", type=float, default=2.0)
     parser.add_argument("--bottom-mode", choices=PARAMETER_MODES, default="dct")
@@ -557,6 +558,7 @@ def main() -> None:
         lam_alpha=args.lam_alpha,
         lam_k=args.lam_k,
         lam_a=args.lam_a,
+        T_ref=args.t_ref,
         verbose=not args.quiet,
     )
 
@@ -596,6 +598,7 @@ def main() -> None:
             "stride": args.stride,
             "dz_km": args.dz_km,
             "z_max_km": args.z_max_km,
+            "t_ref": args.t_ref,
             "layer_transition_z_km": args.layer_transition_z_km,
             "layer_transition_xy_km": args.layer_transition_xy_km,
             "bottom_x": args.bottom_x,
@@ -635,6 +638,7 @@ def main() -> None:
             "stride": args.stride,
             "dz_km": args.dz_km,
             "z_max_km": args.z_max_km,
+            "t_ref": args.t_ref,
             "layer_transition_z_km": args.layer_transition_z_km,
             "layer_transition_xy_km": args.layer_transition_xy_km,
             "early_stop": args.early_stop,
