@@ -579,7 +579,12 @@ def _write_outputs(
 
     reference_summary: dict[str, Any] | None = None
     T_ref_field = None
-    if not args.skip_reference:
+    if args.skip_reference:
+        reference_summary = {
+            "reference_temperature_comparison": "skipped",
+            "reference_temperature_skip_reason": "disabled by --skip-reference",
+        }
+    else:
         reference_csv = args.reference_temperature_csv or Path(metadata["data_dir"]) / REFERENCE_TEMPERATURE_FILENAME
         if reference_csv.exists():
             T_ref_field, _ = _load_reference_temperature(
@@ -610,11 +615,18 @@ def _write_outputs(
             npz_payload["T_difference"] = diff
             reference_summary = {
                 "reference_temperature_csv": str(reference_csv),
+                "reference_temperature_comparison": "computed",
                 "temperature_correlation_by_depth_png": str(eval_dir / "temperature_correlation_by_depth.png"),
                 "overall_temperature_difference": overall,
             }
         elif args.reference_temperature_csv is not None:
             raise FileNotFoundError(f"Reference temperature CSV not found: {reference_csv}")
+        else:
+            reference_summary = {
+                "reference_temperature_csv": str(reference_csv),
+                "reference_temperature_comparison": "skipped",
+                "reference_temperature_skip_reason": "default reference file not found",
+            }
 
     np.savez_compressed(eval_dir / "evaluated_fields.npz", **npz_payload)
 

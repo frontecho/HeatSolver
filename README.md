@@ -1,159 +1,25 @@
 # HeatSolver
 
-HeatSolver 是一个三维稳态地热反演框架
+HeatSolver is a 3D steady-state geothermal inversion framework.
 
 ## Reproducing commands
+
+[Download Dataset](https://drive.hfecho.com/d/CloudflareR2/Guest/Data.zip?sign=CEstFDPhk1TQQgGKtjLZhuPBTimHoyqsZV1wU5sHMmo=:0)
+
+Run a prior-network inversion with DCT parameterization for bottom temperature, conductivity, and heat production.
 
 ```bash
 uv run python inversion.py --mode prior_net --optimizer adamw --lr 0.005 --steps 100 --k-mode dct --a-mode dct --lam-q-std 0.4 --alpha-scale 1200 --k-prop-scale 0.3 --a-prop-scale 0.5 --t-ref 1250
 ```
 
-```txt
-[step 000] loss=9.620936e+01 rmse=12.628 data=7.973649e+01 moment=1.647286e+01 reg=0.000000e+00 Tbot+=[-14.6,14.2] K×=[0.96,1.03] A×=[0.95,1.07]
-[step 001] loss=8.739271e+01 rmse=11.874 data=7.050166e+01 moment=1.689105e+01 reg=0.000000e+00 Tbot+=[-15.8,21.5] K×=[0.96,1.04] A×=[0.97,1.09]
-[step 002] loss=8.827234e+01 rmse=11.871 data=7.045659e+01 moment=1.781575e+01 reg=0.000000e+00 Tbot+=[-50.7,46.7] K×=[0.90,1.18] A×=[0.94,1.32]
-[step 003] loss=7.789151e+01 rmse=11.025 data=6.077261e+01 moment=1.711890e+01 reg=0.000000e+00 Tbot+=[-31.8,42.0] K×=[0.95,1.08] A×=[0.96,1.14]
-[step 004] loss=7.763507e+01 rmse=11.035 data=6.088269e+01 moment=1.675238e+01 reg=0.000000e+00 Tbot+=[-31.8,46.6] K×=[0.95,1.07] A×=[0.97,1.14]
-[step 005] loss=7.395557e+01 rmse=10.746 data=5.773336e+01 moment=1.622222e+01 reg=0.000000e+00 Tbot+=[-37.3,56.8] K×=[0.95,1.08] A×=[0.97,1.17]
-[step 006] loss=6.753919e+01 rmse=10.257 data=5.260693e+01 moment=1.493226e+01 reg=0.000000e+00 Tbot+=[-48.3,74.5] K×=[0.94,1.11] A×=[0.96,1.22]
-[step 007] loss=5.932624e+01 rmse=9.703 data=4.707664e+01 moment=1.224960e+01 reg=0.000000e+00 Tbot+=[-66.7,100.5] K×=[0.91,1.17] A×=[0.95,1.35]
-[step 008] loss=4.962301e+01 rmse=9.188 data=4.220599e+01 moment=7.417019e+00 reg=0.000000e+00 Tbot+=[-100.8,140.5] K×=[0.85,1.26] A×=[0.89,1.57]
-[step 009] loss=3.751075e+01 rmse=8.328 data=3.467988e+01 moment=2.830867e+00 reg=0.000000e+00 Tbot+=[-151.3,182.7] K×=[0.75,1.34] A×=[0.75,1.77]
-[step 010] loss=3.493905e+01 rmse=8.318 data=3.459466e+01 moment=3.443894e-01 reg=0.000000e+00 Tbot+=[-222.2,193.6] K×=[0.66,1.50] A×=[0.56,2.15]
-[step 011] loss=8.590393e+01 rmse=13.000 data=8.449667e+01 moment=1.407266e+00 reg=0.000000e+00 Tbot+=[-253.7,187.8] K×=[0.64,1.56] A×=[0.44,2.25]
-[step 012] loss=6.061274e+01 rmse=11.010 data=6.061051e+01 moment=2.234343e-03 reg=0.000000e+00 Tbot+=[-236.5,197.6] K×=[0.64,1.60] A×=[0.44,2.60]
-[step 013] loss=4.958401e+01 rmse=9.951 data=4.951467e+01 moment=6.934334e-02 reg=0.000000e+00 Tbot+=[-215.7,201.4] K×=[0.65,1.56] A×=[0.47,2.45]
-[step 014] loss=3.075741e+01 rmse=7.733 data=2.989865e+01 moment=8.587671e-01 reg=0.000000e+00 Tbot+=[-200.0,190.6] K×=[0.67,1.49] A×=[0.51,2.04]
-[step 015] loss=3.136344e+01 rmse=7.680 data=2.949417e+01 moment=1.869274e+00 reg=0.000000e+00 Tbot+=[-186.2,177.3] K×=[0.70,1.43] A×=[0.55,1.82]
-[step 016] loss=3.233741e+01 rmse=7.730 data=2.987307e+01 moment=2.464337e+00 reg=0.000000e+00 Tbot+=[-176.9,175.1] K×=[0.71,1.41] A×=[0.58,1.75]
-[step 017] loss=3.140597e+01 rmse=7.606 data=2.892349e+01 moment=2.482472e+00 reg=0.000000e+00 Tbot+=[-177.4,173.5] K×=[0.71,1.42] A×=[0.57,1.75]
-[step 018] loss=3.020272e+01 rmse=7.430 data=2.760486e+01 moment=2.597863e+00 reg=0.000000e+00 Tbot+=[-165.7,176.1] K×=[0.71,1.40] A×=[0.60,1.78]
-[step 019] loss=2.936844e+01 rmse=7.370 data=2.715866e+01 moment=2.209779e+00 reg=0.000000e+00 Tbot+=[-166.6,177.5] K×=[0.70,1.42] A×=[0.59,1.85]
-[step 020] loss=2.848293e+01 rmse=7.259 data=2.634644e+01 moment=2.136489e+00 reg=0.000000e+00 Tbot+=[-169.3,180.4] K×=[0.69,1.45] A×=[0.56,1.87]
-[step 021] loss=2.769419e+01 rmse=7.143 data=2.550825e+01 moment=2.185937e+00 reg=0.000000e+00 Tbot+=[-170.5,187.5] K×=[0.68,1.47] A×=[0.55,1.86]
-[step 022] loss=2.699091e+01 rmse=7.027 data=2.469276e+01 moment=2.298155e+00 reg=0.000000e+00 Tbot+=[-171.9,194.9] K×=[0.68,1.48] A×=[0.53,1.85]
-[step 023] loss=2.656934e+01 rmse=6.945 data=2.411947e+01 moment=2.449863e+00 reg=0.000000e+00 Tbot+=[-174.3,203.7] K×=[0.67,1.50] A×=[0.50,1.82]
-[step 024] loss=2.645719e+01 rmse=6.915 data=2.390782e+01 moment=2.549367e+00 reg=0.000000e+00 Tbot+=[-175.9,211.9] K×=[0.67,1.52] A×=[0.48,1.81]
-[step 025] loss=2.616799e+01 rmse=6.878 data=2.365527e+01 moment=2.512720e+00 reg=0.000000e+00 Tbot+=[-177.4,216.6] K×=[0.66,1.52] A×=[0.47,1.83]
-[step 026] loss=2.589228e+01 rmse=6.860 data=2.352710e+01 moment=2.365177e+00 reg=0.000000e+00 Tbot+=[-177.2,216.8] K×=[0.66,1.53] A×=[0.47,1.88]
-[step 027] loss=2.584361e+01 rmse=6.869 data=2.358931e+01 moment=2.254298e+00 reg=0.000000e+00 Tbot+=[-177.2,217.1] K×=[0.66,1.53] A×=[0.47,1.92]
-[step 028] loss=2.554528e+01 rmse=6.821 data=2.326046e+01 moment=2.284823e+00 reg=0.000000e+00 Tbot+=[-182.8,223.9] K×=[0.65,1.54] A×=[0.45,1.92]
-[step 029] loss=2.543341e+01 rmse=6.795 data=2.308340e+01 moment=2.350008e+00 reg=0.000000e+00 Tbot+=[-188.8,231.3] K×=[0.64,1.56] A×=[0.43,1.92]
-[step 030] loss=2.530251e+01 rmse=6.781 data=2.299381e+01 moment=2.308696e+00 reg=0.000000e+00 Tbot+=[-190.2,233.4] K×=[0.64,1.56] A×=[0.42,1.93]
-[step 031] loss=2.504820e+01 rmse=6.768 data=2.290099e+01 moment=2.147203e+00 reg=0.000000e+00 Tbot+=[-187.2,230.4] K×=[0.64,1.57] A×=[0.42,1.97]
-[step 032] loss=2.497391e+01 rmse=6.781 data=2.299356e+01 moment=1.980347e+00 reg=0.000000e+00 Tbot+=[-186.6,226.2] K×=[0.64,1.58] A×=[0.42,2.01]
-[step 033] loss=2.485517e+01 rmse=6.774 data=2.294318e+01 moment=1.911986e+00 reg=0.000000e+00 Tbot+=[-188.9,226.2] K×=[0.63,1.59] A×=[0.41,2.02]
-[step 034] loss=2.469743e+01 rmse=6.748 data=2.276788e+01 moment=1.929544e+00 reg=0.000000e+00 Tbot+=[-191.5,229.4] K×=[0.63,1.61] A×=[0.40,2.01]
-[step 035] loss=2.465779e+01 rmse=6.740 data=2.271386e+01 moment=1.943931e+00 reg=0.000000e+00 Tbot+=[-193.3,232.1] K×=[0.63,1.62] A×=[0.40,2.00]
-[step 036] loss=2.454991e+01 rmse=6.734 data=2.267190e+01 moment=1.878010e+00 reg=0.000000e+00 Tbot+=[-194.1,232.9] K×=[0.63,1.64] A×=[0.40,2.02]
-[step 037] loss=2.446250e+01 rmse=6.736 data=2.268371e+01 moment=1.778787e+00 reg=0.000000e+00 Tbot+=[-193.9,233.1] K×=[0.62,1.65] A×=[0.40,2.06]
-[step 038] loss=2.443225e+01 rmse=6.739 data=2.270413e+01 moment=1.728123e+00 reg=0.000000e+00 Tbot+=[-193.0,234.5] K×=[0.62,1.66] A×=[0.39,2.08]
-[step 039] loss=2.433837e+01 rmse=6.720 data=2.258201e+01 moment=1.756352e+00 reg=0.000000e+00 Tbot+=[-191.7,237.6] K×=[0.62,1.67] A×=[0.39,2.09]
-[step 040] loss=2.425479e+01 rmse=6.694 data=2.240757e+01 moment=1.847225e+00 reg=0.000000e+00 Tbot+=[-195.4,242.1] K×=[0.62,1.68] A×=[0.39,2.07]
-[step 041] loss=2.422353e+01 rmse=6.678 data=2.229610e+01 moment=1.927428e+00 reg=0.000000e+00 Tbot+=[-199.6,246.1] K×=[0.62,1.68] A×=[0.39,2.06]
-[step 042] loss=2.412868e+01 rmse=6.663 data=2.220071e+01 moment=1.927966e+00 reg=0.000000e+00 Tbot+=[-202.5,248.3] K×=[0.62,1.68] A×=[0.40,2.09]
-[step 043] loss=2.409988e+01 rmse=6.660 data=2.218049e+01 moment=1.919388e+00 reg=0.000000e+00 Tbot+=[-204.8,249.6] K×=[0.62,1.68] A×=[0.40,2.11]
-[step 044] loss=2.405473e+01 rmse=6.645 data=2.208115e+01 moment=1.973575e+00 reg=0.000000e+00 Tbot+=[-207.3,251.6] K×=[0.62,1.68] A×=[0.39,2.12]
-[step 045] loss=2.400154e+01 rmse=6.621 data=2.192080e+01 moment=2.080739e+00 reg=0.000000e+00 Tbot+=[-210.1,254.1] K×=[0.63,1.68] A×=[0.39,2.10]
-[step 046] loss=2.398638e+01 rmse=6.610 data=2.184784e+01 moment=2.138542e+00 reg=0.000000e+00 Tbot+=[-211.5,255.1] K×=[0.63,1.68] A×=[0.39,2.10]
-[step 047] loss=2.392339e+01 rmse=6.609 data=2.183931e+01 moment=2.084071e+00 reg=0.000000e+00 Tbot+=[-211.1,253.4] K×=[0.63,1.68] A×=[0.39,2.13]
-[step 048] loss=2.391043e+01 rmse=6.615 data=2.187775e+01 moment=2.032674e+00 reg=0.000000e+00 Tbot+=[-210.1,251.3] K×=[0.63,1.67] A×=[0.38,2.16]
-[step 049] loss=2.385669e+01 rmse=6.604 data=2.180499e+01 moment=2.051691e+00 reg=0.000000e+00 Tbot+=[-209.4,250.8] K×=[0.63,1.67] A×=[0.38,2.15]
-[step 050] loss=2.385242e+01 rmse=6.600 data=2.177729e+01 moment=2.075128e+00 reg=0.000000e+00 Tbot+=[-208.3,250.2] K×=[0.63,1.66] A×=[0.38,2.14]
-[step 051] loss=2.381157e+01 rmse=6.606 data=2.181698e+01 moment=1.994591e+00 reg=0.000000e+00 Tbot+=[-205.4,247.0] K×=[0.63,1.65] A×=[0.38,2.16]
-[step 052] loss=2.381439e+01 rmse=6.618 data=2.189785e+01 moment=1.916542e+00 reg=0.000000e+00 Tbot+=[-202.0,243.6] K×=[0.63,1.64] A×=[0.37,2.19]
-[step 053] loss=2.378308e+01 rmse=6.611 data=2.185087e+01 moment=1.932206e+00 reg=0.000000e+00 Tbot+=[-199.3,241.9] K×=[0.63,1.64] A×=[0.37,2.17]
-[step 054] loss=2.378541e+01 rmse=6.607 data=2.182561e+01 moment=1.959794e+00 reg=0.000000e+00 Tbot+=[-196.7,240.4] K×=[0.63,1.63] A×=[0.37,2.15]
-[step 055] loss=2.375618e+01 rmse=6.611 data=2.185394e+01 moment=1.902232e+00 reg=0.000000e+00 Tbot+=[-193.7,237.9] K×=[0.63,1.63] A×=[0.37,2.16]
-[step 056] loss=2.375079e+01 rmse=6.612 data=2.186192e+01 moment=1.888877e+00 reg=0.000000e+00 Tbot+=[-191.7,236.6] K×=[0.63,1.63] A×=[0.38,2.16]
-[step 057] loss=2.373542e+01 rmse=6.600 data=2.178145e+01 moment=1.953971e+00 reg=0.000000e+00 Tbot+=[-193.8,237.1] K×=[0.63,1.62] A×=[0.38,2.13]
-[step 058] loss=2.371867e+01 rmse=6.599 data=2.177289e+01 moment=1.945782e+00 reg=0.000000e+00 Tbot+=[-195.0,237.5] K×=[0.63,1.62] A×=[0.38,2.13]
-[step 059] loss=2.372519e+01 rmse=6.605 data=2.181133e+01 moment=1.913865e+00 reg=0.000000e+00 Tbot+=[-195.5,238.3] K×=[0.63,1.62] A×=[0.38,2.14]
-[step 060] loss=2.371316e+01 rmse=6.593 data=2.173672e+01 moment=1.976436e+00 reg=0.000000e+00 Tbot+=[-195.8,240.2] K×=[0.63,1.63] A×=[0.38,2.12]
-[step 061] loss=2.370323e+01 rmse=6.594 data=2.174065e+01 moment=1.962581e+00 reg=0.000000e+00 Tbot+=[-195.7,241.6] K×=[0.63,1.63] A×=[0.38,2.13]
-[step 062] loss=2.370592e+01 rmse=6.600 data=2.177770e+01 moment=1.928215e+00 reg=0.000000e+00 Tbot+=[-195.5,242.7] K×=[0.63,1.62] A×=[0.38,2.15]
-[step 063] loss=2.370549e+01 rmse=6.592 data=2.172775e+01 moment=1.977738e+00 reg=0.000000e+00 Tbot+=[-195.4,243.9] K×=[0.63,1.62] A×=[0.38,2.13]
-[step 064] loss=2.370161e+01 rmse=6.605 data=2.181585e+01 moment=1.885760e+00 reg=0.000000e+00 Tbot+=[-195.2,244.1] K×=[0.63,1.62] A×=[0.38,2.17]
-[step 065] loss=2.369307e+01 rmse=6.598 data=2.176402e+01 moment=1.929051e+00 reg=0.000000e+00 Tbot+=[-195.5,244.6] K×=[0.63,1.62] A×=[0.38,2.15]
-[step 066] loss=2.368640e+01 rmse=6.605 data=2.181079e+01 moment=1.875610e+00 reg=0.000000e+00 Tbot+=[-196.1,244.9] K×=[0.63,1.62] A×=[0.38,2.18]
-[step 067] loss=2.368049e+01 rmse=6.598 data=2.176817e+01 moment=1.912321e+00 reg=0.000000e+00 Tbot+=[-197.1,245.5] K×=[0.63,1.62] A×=[0.38,2.17]
-[step 068] loss=2.367745e+01 rmse=6.598 data=2.176374e+01 moment=1.913704e+00 reg=0.000000e+00 Tbot+=[-198.0,245.8] K×=[0.63,1.62] A×=[0.38,2.17]
-[step 069] loss=2.367772e+01 rmse=6.594 data=2.174057e+01 moment=1.937145e+00 reg=0.000000e+00 Tbot+=[-198.4,245.6] K×=[0.63,1.62] A×=[0.38,2.16]
-[step 070] loss=2.367662e+01 rmse=6.593 data=2.173407e+01 moment=1.942551e+00 reg=0.000000e+00 Tbot+=[-198.0,244.5] K×=[0.63,1.62] A×=[0.38,2.16]
-[step 071] loss=2.367038e+01 rmse=6.594 data=2.174295e+01 moment=1.927431e+00 reg=0.000000e+00 Tbot+=[-196.7,242.3] K×=[0.62,1.62] A×=[0.38,2.16]
-[step 072] loss=2.366648e+01 rmse=6.594 data=2.174111e+01 moment=1.925370e+00 reg=0.000000e+00 Tbot+=[-195.2,239.9] K×=[0.62,1.62] A×=[0.38,2.16]
-[step 073] loss=2.366898e+01 rmse=6.600 data=2.177875e+01 moment=1.890223e+00 reg=0.000000e+00 Tbot+=[-194.3,238.0] K×=[0.62,1.62] A×=[0.39,2.18]
-[step 074] loss=2.369060e+01 rmse=6.588 data=2.170367e+01 moment=1.986934e+00 reg=0.000000e+00 Tbot+=[-194.4,237.3] K×=[0.61,1.62] A×=[0.39,2.15]
-[step 075] loss=2.385016e+01 rmse=6.636 data=2.201671e+01 moment=1.833449e+00 reg=0.000000e+00 Tbot+=[-194.9,236.3] K×=[0.61,1.61] A×=[0.39,2.23]
-[step 076] loss=2.431235e+01 rmse=6.649 data=2.210539e+01 moment=2.206956e+00 reg=0.000000e+00 Tbot+=[-194.2,236.6] K×=[0.61,1.61] A×=[0.39,2.07]
-[step 077] loss=2.478026e+01 rmse=6.800 data=2.312132e+01 moment=1.658937e+00 reg=0.000000e+00 Tbot+=[-192.4,230.1] K×=[0.61,1.60] A×=[0.39,2.32]
-[step 078] loss=2.369056e+01 rmse=6.605 data=2.181387e+01 moment=1.876695e+00 reg=0.000000e+00 Tbot+=[-191.2,226.4] K×=[0.61,1.60] A×=[0.39,2.22]
-[step 079] loss=2.433941e+01 rmse=6.660 data=2.217739e+01 moment=2.162020e+00 reg=0.000000e+00 Tbot+=[-193.0,225.3] K×=[0.62,1.61] A×=[0.39,2.09]
-[step 080] loss=2.368386e+01 rmse=6.594 data=2.174171e+01 moment=1.942143e+00 reg=0.000000e+00 Tbot+=[-188.3,217.5] K×=[0.62,1.60] A×=[0.39,2.18]
-[step 081] loss=2.400164e+01 rmse=6.667 data=2.222382e+01 moment=1.777819e+00 reg=0.000000e+00 Tbot+=[-186.1,211.7] K×=[0.62,1.60] A×=[0.39,2.26]
-[step 082] loss=2.390518e+01 rmse=6.645 data=2.208123e+01 moment=1.823942e+00 reg=0.000000e+00 Tbot+=[-187.6,213.9] K×=[0.62,1.60] A×=[0.39,2.24]
-[step 083] loss=2.371009e+01 rmse=6.588 data=2.169936e+01 moment=2.010734e+00 reg=0.000000e+00 Tbot+=[-189.1,220.4] K×=[0.62,1.60] A×=[0.39,2.18]
-[step 084] loss=2.398795e+01 rmse=6.608 data=2.183529e+01 moment=2.152654e+00 reg=0.000000e+00 Tbot+=[-191.5,226.2] K×=[0.62,1.61] A×=[0.39,2.13]
-[step 085] loss=2.375379e+01 rmse=6.586 data=2.168473e+01 moment=2.069061e+00 reg=0.000000e+00 Tbot+=[-193.2,229.3] K×=[0.62,1.61] A×=[0.40,2.17]
-[step 086] loss=2.373334e+01 rmse=6.602 data=2.179314e+01 moment=1.940193e+00 reg=0.000000e+00 Tbot+=[-194.6,231.4] K×=[0.62,1.61] A×=[0.40,2.22]
-[step 087] loss=2.384431e+01 rmse=6.627 data=2.195933e+01 moment=1.884972e+00 reg=0.000000e+00 Tbot+=[-196.0,234.1] K×=[0.62,1.61] A×=[0.40,2.25]
-[step 088] loss=2.376645e+01 rmse=6.611 data=2.185496e+01 moment=1.911493e+00 reg=0.000000e+00 Tbot+=[-197.5,237.4] K×=[0.62,1.61] A×=[0.40,2.24]
-[step 089] loss=2.368613e+01 rmse=6.588 data=2.169879e+01 moment=1.987336e+00 reg=0.000000e+00 Tbot+=[-199.0,240.8] K×=[0.62,1.61] A×=[0.40,2.21]
-[step 090] loss=2.376177e+01 rmse=6.589 data=2.170789e+01 moment=2.053877e+00 reg=0.000000e+00 Tbot+=[-200.2,243.3] K×=[0.62,1.61] A×=[0.40,2.18]
-[step 091] loss=2.378311e+01 rmse=6.592 data=2.172809e+01 moment=2.055017e+00 reg=0.000000e+00 Tbot+=[-200.7,244.4] K×=[0.62,1.61] A×=[0.40,2.18]
-[step 092] loss=2.369869e+01 rmse=6.589 data=2.170854e+01 moment=1.990155e+00 reg=0.000000e+00 Tbot+=[-200.5,244.1] K×=[0.62,1.61] A×=[0.39,2.20]
-[step 093] loss=2.369886e+01 rmse=6.601 data=2.178865e+01 moment=1.910204e+00 reg=0.000000e+00 Tbot+=[-200.0,243.2] K×=[0.62,1.61] A×=[0.39,2.23]
-[step 094] loss=2.375055e+01 rmse=6.616 data=2.188625e+01 moment=1.864302e+00 reg=0.000000e+00 Tbot+=[-199.5,242.5] K×=[0.62,1.61] A×=[0.39,2.25]
-[step 095] loss=2.372794e+01 rmse=6.612 data=2.185729e+01 moment=1.870646e+00 reg=0.000000e+00 Tbot+=[-199.2,242.3] K×=[0.62,1.61] A×=[0.39,2.25]
-[step 096] loss=2.367908e+01 rmse=6.597 data=2.176187e+01 moment=1.917209e+00 reg=0.000000e+00 Tbot+=[-199.2,242.4] K×=[0.62,1.61] A×=[0.39,2.23]
-[step 097] loss=2.369824e+01 rmse=6.592 data=2.172904e+01 moment=1.969201e+00 reg=0.000000e+00 Tbot+=[-199.2,242.4] K×=[0.62,1.61] A×=[0.39,2.21]
-[step 098] loss=2.372242e+01 rmse=6.593 data=2.173481e+01 moment=1.987615e+00 reg=0.000000e+00 Tbot+=[-199.0,241.9] K×=[0.62,1.61] A×=[0.39,2.20]
-[step 099] loss=2.368745e+01 rmse=6.592 data=2.172706e+01 moment=1.960390e+00 reg=0.000000e+00 Tbot+=[-198.8,241.2] K×=[0.61,1.61] A×=[0.39,2.21]
-[step 100] loss=2.366886e+01 rmse=6.597 data=2.175702e+01 moment=1.911838e+00 reg=0.000000e+00 Tbot+=[-198.7,240.2] K×=[0.61,1.61] A×=[0.39,2.23]
-Output directory: outputs\20260522_112830
-```
+Evaluate a saved inversion checkpoint and write diagnostic fields and plots.
 
 ```bash
 uv run python evaluation.py outputs/20260522_112830
 ```
 
-```txt
-Evaluating checkpoint: outputs\20260522_112830\checkpoint.pt
-Grid: 37x23x61; output: outputs\20260522_112830\evaluation
-Solve 1 start: grid=37x23x61, unknowns=50209, max_picard=20
-Solve 1 boundary temperatures: Tsurf=5.8-16.7 C, Tbot=1101.3-1540.2 C
-Solve 1 done: converged, iterations=3, rel=7.628e-06, cg_iters=40, total_time=0.66s, final_T=5.8-1540.2 C, reused AMG after first Picard step
-Evaluation summary: outputs\20260522_112830\evaluation/evaluation_summary.json
-```
+Run the uncertainty-quantification workflow using the prior-network inversion mode.
 
 ```bash
-uv run python inversion.py --k-mode dct --a-mode dct --lam-q-std 0.4 --alpha-scale 1200 --k-prop-scale 0.3 --a-prop-scale 0.5 --t-ref 1300
-```
-
-```txt
-[step 000] loss=8.970560e+01 rmse=12.077 data=7.292447e+01 moment=1.678113e+01 reg=0.000000e+00 Tbot+=[0.0,0.0] K×=[1.00,1.00] A×=[1.00,1.00]
-[step 001] loss=3.082262e+01 rmse=7.415 data=2.749379e+01 moment=3.328830e+00 reg=0.000000e+00 Tbot+=[-250.5,195.8] K×=[0.71,1.43] A×=[0.55,2.03]
-[step 002] loss=2.480590e+01 rmse=6.803 data=2.314258e+01 moment=1.663324e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.63,1.57] A×=[0.44,2.01]
-[step 003] loss=2.423698e+01 rmse=6.706 data=2.248431e+01 moment=1.752673e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.38,2.08]
-[step 004] loss=2.416881e+01 rmse=6.700 data=2.244281e+01 moment=1.726002e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.36,2.05]
-[step 005] loss=2.416231e+01 rmse=6.695 data=2.241226e+01 moment=1.750048e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.36,2.05]
-[step 006] loss=2.416074e+01 rmse=6.696 data=2.242046e+01 moment=1.740278e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.36,2.05]
-[step 007] loss=2.416063e+01 rmse=6.696 data=2.242155e+01 moment=1.739076e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.36,2.05]
-[step 008] loss=2.416055e+01 rmse=6.696 data=2.242010e+01 moment=1.740447e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.36,2.05]
-[step 009] loss=2.416053e+01 rmse=6.696 data=2.241961e+01 moment=1.740918e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.36,2.05]
-[step 010] loss=2.416052e+01 rmse=6.696 data=2.241898e+01 moment=1.741544e+00 reg=0.000000e+00 Tbot+=[-266.6,185.0] K×=[0.58,1.61] A×=[0.36,2.05]
-Output directory: outputs\20260522_113442
-```
-
-```bash
-uv run python evaluation.py outputs/20260522_113442
-```
-
-```txt
-Evaluating checkpoint: outputs\20260522_113442\checkpoint.pt
-Grid: 37x23x61; output: outputs\20260522_113442\evaluation
-Solve 1 start: grid=37x23x61, unknowns=50209, max_picard=20
-Solve 1 boundary temperatures: Tsurf=5.8-16.7 C, Tbot=1033.4-1485.0 C
-Solve 1 done: converged, iterations=3, rel=7.643e-06, cg_iters=41, total_time=0.46s, final_T=5.8-1485.0 C, reused AMG after first Picard step
-Evaluation summary: outputs\20260522_113442\evaluation/evaluation_summary.json
+uv run python inversion_uq.py --mode prior_net
 ```
