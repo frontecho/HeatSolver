@@ -55,6 +55,7 @@ def write_layergrid_csvs(
                     "Moho": 30.0 + iy,
                     "thk_uc": 10.0,
                     "thk_mc": 12.0,
+                    "thk_lc": 7.0,
                 }
             )
             thermal_rows.append({"id": cell_id, "Surface_Temperature": 8.0 + iy + ix})
@@ -73,7 +74,7 @@ def write_layergrid_csvs(
         writer.writeheader()
         writer.writerows(grid_rows)
     with layer_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["id", "Total_Sediment", "Moho", "thk_uc", "thk_mc"])
+        writer = csv.DictWriter(handle, fieldnames=["id", "Total_Sediment", "Moho", "thk_uc", "thk_mc", "thk_lc"])
         writer.writeheader()
         writer.writerows(layer_rows)
     if include_thermal:
@@ -171,7 +172,7 @@ class LayerGridTest(unittest.TestCase):
         self.assertAlmostEqual(float(grid.sed_thick[0, 0]), 3.6)
         self.assertNotIn("zhongyuangujie", grid.stratum_thick)
         self.assertAlmostEqual(grid.boundaries(0, 0)["sed_base"], 3.6)
-        self.assertAlmostEqual(grid.boundaries(0, 0)["uc_base"], 13.6)
+        self.assertAlmostEqual(grid.boundaries(0, 0)["uc_base"], 3.6 + 10.0 * (30.0 - 3.6) / 29.0)
 
 
 class ReferenceFieldsTest(unittest.TestCase):
