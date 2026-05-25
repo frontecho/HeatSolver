@@ -72,9 +72,9 @@ class LayerGrid:
         lower_crust  mc_base → moho
         mantle       moho → z_max
 
-    Total_Sediment, Moho, thk_uc, and thk_mc come from layer_csv.
-    thk_uc and thk_mc define the uc/mc interface within the crystalline
-    crust; they are scaled so uc+mc <= moho-sed.
+    Total_Sediment, Moho, thk_uc, thk_mc, and thk_lc come from layer_csv.
+    thk_uc, thk_mc, and thk_lc are scaled to fill the crystalline crust
+    thickness moho-sed.
 
     Attributes (all 2-D arrays, shape (ny, nx)):
         x, y            projected coordinates (m)
@@ -99,7 +99,7 @@ class LayerGrid:
         gdf  = pd.read_csv(grid_csv,   encoding="utf-8-sig")
         ldf  = pd.read_csv(layer_csv,  encoding="utf-8-sig")
 
-        df = gdf.merge(ldf[["id", "Total_Sediment", "Moho", "thk_uc", "thk_mc"]], on="id", how="left")
+        df = gdf.merge(ldf[["id", "Total_Sediment", "Moho", "thk_uc", "thk_mc", "thk_lc"]], on="id", how="left")
 
         if stratum_csv is not None:
             sdf = pd.read_csv(Path(stratum_csv), encoding="utf-8-sig")[["id", *SEDIMENT_STRATUM_NAMES]]
@@ -136,17 +136,14 @@ class LayerGrid:
         moh_raw = df["Moho"].values.astype(float)                    # km
         cryst   = np.maximum(moh_raw - sed_raw, 0.0)  # crystalline crust thickness
 
-        # scale thk_uc / thk_mc so their sum fits within crystalline crust
         uc_raw  = df["thk_uc"].values.astype(float)
         mc_raw  = df["thk_mc"].values.astype(float)
-        uc_mc   = uc_raw + mc_raw
-        # avoid division by zero where uc_mc == 0
-        scale   = np.where(uc_mc > 0, cryst / uc_mc, 0.0)
-        # cap scale at 1 so we never expand beyond crystalline crust
-        scale   = np.minimum(scale, 1.0)
+        lc_raw  = df["thk_lc"].values.astype(float)
+        crust_raw = uc_raw + mc_raw + lc_raw
+        scale   = np.where(crust_raw > 0, cryst / crust_raw, 0.0)
         uc_scaled = uc_raw * scale
         mc_scaled = mc_raw * scale
-        lc_scaled = np.maximum(cryst - uc_scaled - mc_scaled, 0.0)
+        lc_scaled = lc_raw * scale
 
         def _fill_arr(arr):
             g = np.full((ny_full, nx_full), np.nan)
