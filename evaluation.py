@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Evaluate a direct-inversion checkpoint."""
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from inversion import build_problem, load_checkpoint
+from inversion import build_problem, load_checkpoint, verify_input_hashes
 from parameterization import DirectParameterization
 
 
@@ -28,7 +28,7 @@ def _field_stats(field: np.ndarray) -> dict[str, float | int]:
 def evaluate_checkpoint(checkpoint_path: Path) -> tuple[Any, Any, dict[str, np.ndarray], np.ndarray, dict[str, Any]]:
     parameters, metadata = load_checkpoint(checkpoint_path)
     data = metadata["data"]
-    grid, solver, q_obs = build_problem(
+    grid, solver, q_obs, input_sha256 = build_problem(
         Path(data["data_dir"]),
         stride=data["stride"],
         dz_km=data["dz_km"],
@@ -36,7 +36,10 @@ def evaluate_checkpoint(checkpoint_path: Path) -> tuple[Any, Any, dict[str, np.n
         layer_transition_xy_km=data["layer_transition_xy_km"],
         layer_transition_z_km=data["layer_transition_z_km"],
     )
+    verify_input_hashes(data["input_sha256"], input_sha256)
     parameterization = DirectParameterization.from_config(metadata["parameterization"])
+    if grid.shape != (parameterization.ny, parameterization.nx):
+        raise ValueError("checkpoint and data grid shapes differ")
     fields = parameterization.decode(solver, parameters, T_ref=data["t_ref"])
     fields["T"] = solver.solve(
         fields["T_bot"],

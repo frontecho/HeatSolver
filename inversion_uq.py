@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Empirical direct-inversion ensemble from a template checkpoint."""
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -11,7 +11,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from inversion import build_problem, load_checkpoint, run_inversion, save_checkpoint
+from inversion import (
+    CHECKPOINT_FORMAT_VERSION,
+    build_problem,
+    load_checkpoint,
+    run_inversion,
+    save_checkpoint,
+    verify_input_hashes,
+)
 from parameterization import DirectParameterization
 
 
@@ -22,6 +29,8 @@ def split_observations(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     valid_indices = np.flatnonzero(np.isfinite(q_obs).ravel())
     holdout_count = round(holdout_fraction * valid_indices.size)
+    if not 0 < holdout_count < valid_indices.size:
+        raise ValueError("holdout split must leave both training and holdout observations")
     rng = np.random.default_rng(seed)
     held_indices = rng.choice(valid_indices, size=holdout_count, replace=False)
     train = q_obs.copy()
@@ -68,9 +77,13 @@ def run_uq(
     maxiter: int,
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
-    template_parameters, metadata = load_checkpoint(checkpoint_path)
+    if members < 1:
+        raise ValueError("members must be positive")
+    if initial_noise_fraction < 0.0 or maxiter < 0:
+        raise ValueError("initial noise and maxiter must be non-negative")
+    _, metadata = load_checkpoint(checkpoint_path)
     data = metadata["data"]
-    grid, solver, q_obs = build_problem(
+    grid, solver, q_obs, input_sha256 = build_problem(
         Path(data["data_dir"]),
         stride=data["stride"],
         dz_km=data["dz_km"],
@@ -78,10 +91,13 @@ def run_uq(
         layer_transition_xy_km=data["layer_transition_xy_km"],
         layer_transition_z_km=data["layer_transition_z_km"],
     )
+    verify_input_hashes(data["input_sha256"], input_sha256)
     parameterization = DirectParameterization.from_config(metadata["parameterization"])
+    if grid.shape != (parameterization.ny, parameterization.nx):
+        raise ValueError("checkpoint and data grid shapes differ")
     objective = metadata["objective"]
     bounds = np.asarray(parameterization.bounds(), dtype=np.float64)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True)
     members_dir = output_dir / "members"
     members_dir.mkdir(exist_ok=True)
 
@@ -99,13 +115,14 @@ def run_uq(
         if parameterization.size:
             scales = bounds[:, 1]
             initial_parameters = np.clip(
-                template_parameters
-                + rng.normal(size=parameterization.size) * initial_noise_fraction * scales,
+                rng.normal(size=parameterization.size)
+                * initial_noise_fraction
+                * scales,
                 bounds[:, 0],
                 bounds[:, 1],
             )
         else:
-            initial_parameters = template_parameters.copy()
+            initial_parameters = parameterization.initial()
 
         solver.clear_warm_start()
         result = run_inversion(
@@ -124,12 +141,16 @@ def run_uq(
         member_dir.mkdir()
         member_metadata = {
             **metadata,
-            "uq_member": {
-                "index": member_index,
-                "seed": member_seed,
-                "holdout_fraction": holdout_fraction,
-                "initial_noise_fraction": initial_noise_fraction,
+            "run": {
                 "maxiter": maxiter,
+                "initial_checkpoint": None,
+                "template_checkpoint": str(checkpoint_path.resolve()),
+                "uq_member": {
+                    "index": member_index,
+                    "seed": member_seed,
+                    "holdout_fraction": holdout_fraction,
+                    "initial_noise_fraction": initial_noise_fraction,
+                },
             },
         }
         save_checkpoint(
@@ -156,6 +177,9 @@ def run_uq(
             "loss": result["final_loss"],
             "gradient_norm": result["final_gradient_norm"],
             "iterations": result["optimization"]["iterations"],
+            "success": result["optimization"]["success"],
+            "status": result["optimization"]["status"],
+            "message": result["optimization"]["message"],
             "pde_evaluations": result["pde_evaluations"],
             "elapsed_s": result["elapsed_s"],
         }
@@ -190,12 +214,13 @@ def run_uq(
         "members": members,
         "train_rmse_mean_mW_m2": float(np.mean([row["train_rmse_mW_m2"] for row in summaries])),
         "holdout_rmse_mean_mW_m2": float(np.mean([row["holdout_rmse_mW_m2"] for row in summaries])),
+        "success_count": sum(row["success"] for row in summaries),
         "elapsed_s": time.perf_counter() - start,
     }
     with (output_dir / "aggregate_summary.json").open("w", encoding="utf-8", newline="\n") as stream:
         json.dump(aggregate_summary, stream, indent=2)
     manifest = {
-        "format_version": 1,
+        "format_version": CHECKPOINT_FORMAT_VERSION,
         "template_checkpoint": str(checkpoint_path.resolve()),
         "data": data,
         "parameterization": parameterization.config(),

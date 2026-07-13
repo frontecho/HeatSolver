@@ -1,8 +1,9 @@
-from __future__ import annotations
-
 """Direct PDE-constrained geothermal inversion."""
 
+from __future__ import annotations
+
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -25,6 +26,29 @@ from heat_solver import HeatSolver
 from lithosphere_model import LayerGrid, build_reference_fields
 from parameterization import PARAMETER_MODES, DirectParameterization
 
+CHECKPOINT_FORMAT_VERSION = 2
+INPUT_FILENAMES = (
+    GRID_FILENAME,
+    LAYER_FILENAME,
+    STRATUM_FILLED_FILENAME,
+    THERMAL_GRID_FILENAME,
+    THERMAL_PROPERTIES_FILENAME,
+    HEATFLOW_FILENAME,
+)
+
+
+def hash_input_files(data_dir: Path) -> dict[str, str]:
+    hashes = {}
+    for filename in INPUT_FILENAMES:
+        with (data_dir / filename).open("rb") as stream:
+            hashes[filename] = hashlib.file_digest(stream, "sha256").hexdigest()
+    return hashes
+
+
+def verify_input_hashes(expected: dict[str, str], actual: dict[str, str]) -> None:
+    if actual != expected:
+        raise ValueError("input files differ from the checkpoint")
+
 
 def build_problem(
     data_dir: Path,
@@ -34,7 +58,8 @@ def build_problem(
     z_max_km: float,
     layer_transition_xy_km: float,
     layer_transition_z_km: float,
-) -> tuple[LayerGrid, HeatSolver, np.ndarray]:
+) -> tuple[LayerGrid, HeatSolver, np.ndarray, dict[str, str]]:
+    input_sha256 = hash_input_files(data_dir)
     vertical_intervals = round(z_max_km / dz_km)
     if not np.isclose(vertical_intervals * dz_km, z_max_km):
         raise ValueError("z_max_km must be divisible by dz_km")
@@ -71,7 +96,7 @@ def build_problem(
         A_ref=refs.A_ref,
         layer_masks=refs.layer_masks,
     )
-    return grid, solver, q_obs
+    return grid, solver, q_obs, input_sha256
 
 
 def _coefficient_regularization(
@@ -83,18 +108,22 @@ def _coefficient_regularization(
     metrics: dict[str, float] = {}
     total = 0.0
     groups = {
-        "bottom": parameterization.bottom_slice,
-        "K": parameterization.k_slice,
-        "A": parameterization.a_slice,
+        "bottom": (parameterization.bottom_slice, parameterization.bottom_mode),
+        "K": (parameterization.k_slice, parameterization.k_mode),
+        "A": (parameterization.a_slice, parameterization.a_mode),
     }
-    for name, parameter_slice in groups.items():
+    for name, (parameter_slice, mode) in groups.items():
         values = parameters[parameter_slice]
         weight = weights[name]
-        value = 0.0 if values.size == 0 else 0.5 * weight * float(np.mean(values**2))
+        scale = (
+            1.0 / (parameterization.ny * parameterization.nx)
+            if mode == "full"
+            else 1.0
+        )
+        value = 0.5 * weight * scale * float(np.sum(values**2))
         metrics[f"{name}_regularization"] = value
         total += value
-        if values.size:
-            gradient[parameter_slice] = weight * values / values.size
+        gradient[parameter_slice] = weight * scale * values
     metrics["coefficient_regularization"] = total
     return total, gradient, metrics
 
@@ -106,8 +135,6 @@ def evaluate_objective(
     parameters: np.ndarray,
     *,
     T_ref: float,
-    lam_q_mean: float = 0.0,
-    lam_q_std: float = 0.0,
     lam_bottom: float = 0.0,
     lam_k: float = 0.0,
     lam_a: float = 0.0,
@@ -128,29 +155,15 @@ def evaluate_objective(
     grad_q_valid = residual / count
     predicted_mean = float(np.mean(predicted))
     observed_mean = float(np.mean(observed))
-    mean_difference = predicted_mean - observed_mean
-    moment_mean = 0.5 * lam_q_mean * mean_difference**2
-    grad_q_valid += lam_q_mean * mean_difference / count
-
-    predicted_centered = predicted - predicted_mean
-    predicted_std = float(np.sqrt(np.mean(predicted_centered**2)))
+    predicted_std = float(np.std(predicted))
     observed_std = float(np.std(observed))
-    std_difference = predicted_std - observed_std
-    moment_std = 0.5 * lam_q_std * std_difference**2
-    if lam_q_std and predicted_std:
-        grad_q_valid += (
-            lam_q_std
-            * std_difference
-            * predicted_centered
-            / (count * predicted_std)
-        )
 
     regularization, regularization_gradient, regularization_metrics = _coefficient_regularization(
         parameters,
         parameterization,
         {"bottom": lam_bottom, "K": lam_k, "A": lam_a},
     )
-    loss = data_misfit + moment_mean + moment_std + regularization
+    loss = data_misfit + regularization
 
     if parameterization.size:
         grad_q = np.zeros_like(q_pred)
@@ -177,8 +190,6 @@ def evaluate_objective(
         "loss": loss,
         "data_misfit": data_misfit,
         "rmse_mW_m2": float(np.sqrt(np.mean(residual**2))),
-        "moment_mean": moment_mean,
-        "moment_std": moment_std,
         "predicted_mean_mW_m2": predicted_mean,
         "predicted_std_mW_m2": predicted_std,
         "observed_mean_mW_m2": observed_mean,
@@ -190,7 +201,6 @@ def evaluate_objective(
             "T": T,
             "q_pred": q_pred,
             "residual": residual_field,
-            "valid_mask": valid,
             "metrics": metrics,
         }
     )
@@ -205,14 +215,12 @@ def run_inversion(
     T_ref: float = 1300.0,
     maxiter: int = 40,
     initial_parameters: np.ndarray | None = None,
-    lam_q_mean: float = 0.0,
-    lam_q_std: float = 0.0,
     lam_bottom: float = 0.0,
     lam_k: float = 0.0,
     lam_a: float = 0.0,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    weights = (lam_q_mean, lam_q_std, lam_bottom, lam_k, lam_a)
+    weights = (lam_bottom, lam_k, lam_a)
     if any(weight < 0.0 for weight in weights):
         raise ValueError("regularization weights must be non-negative")
     parameters = parameterization.initial() if initial_parameters is None else np.asarray(initial_parameters, dtype=np.float64)
@@ -233,8 +241,6 @@ def run_inversion(
                 parameterization,
                 x,
                 T_ref=T_ref,
-                lam_q_mean=lam_q_mean,
-                lam_q_std=lam_q_std,
                 lam_bottom=lam_bottom,
                 lam_k=lam_k,
                 lam_a=lam_a,
@@ -331,7 +337,22 @@ def load_checkpoint(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
     with np.load(path, allow_pickle=False) as checkpoint:
         parameters = checkpoint["parameters"].astype(np.float64, copy=True)
         metadata = json.loads(str(checkpoint["metadata"].item()))
+    if metadata["format_version"] != CHECKPOINT_FORMAT_VERSION:
+        raise ValueError("unsupported checkpoint format")
     return parameters, metadata
+
+
+def load_initial_checkpoint(
+    path: Path,
+    data_config: dict[str, Any],
+    parameterization_config: dict[str, Any],
+) -> np.ndarray:
+    parameters, metadata = load_checkpoint(path)
+    if metadata["data"] != data_config:
+        raise ValueError("initial checkpoint uses different data settings")
+    if metadata["parameterization"] != parameterization_config:
+        raise ValueError("initial checkpoint uses a different parameterization")
+    return parameters
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -350,7 +371,6 @@ def save_run(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     save_checkpoint(output_dir / "checkpoint.npz", result["parameters"], metadata)
     np.savez_compressed(
         output_dir / "surface_fields.npz",
@@ -433,8 +453,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--a-log-bound", type=float, default=0.7)
 
     parser.add_argument("--maxiter", type=int, default=40)
-    parser.add_argument("--lam-q-mean", type=float, default=0.0)
-    parser.add_argument("--lam-q-std", type=float, default=0.0)
     parser.add_argument("--lam-bottom", type=float, default=0.0)
     parser.add_argument("--lam-k", type=float, default=0.0)
     parser.add_argument("--lam-a", type=float, default=0.0)
@@ -446,7 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    grid, solver, q_obs = build_problem(
+    grid, solver, q_obs, input_sha256 = build_problem(
         args.data_dir,
         stride=args.stride,
         dz_km=args.dz_km,
@@ -469,24 +487,6 @@ def main() -> None:
         k_log_bound=args.k_log_bound,
         a_log_bound=args.a_log_bound,
     )
-    initial_parameters = None
-    if args.initial_checkpoint is not None:
-        initial_parameters, _ = load_checkpoint(args.initial_checkpoint)
-
-    result = run_inversion(
-        solver,
-        q_obs,
-        parameterization,
-        T_ref=args.t_ref,
-        maxiter=args.maxiter,
-        initial_parameters=initial_parameters,
-        lam_q_mean=args.lam_q_mean,
-        lam_q_std=args.lam_q_std,
-        lam_bottom=args.lam_bottom,
-        lam_k=args.lam_k,
-        lam_a=args.lam_a,
-        verbose=not args.quiet,
-    )
     data_config = {
         "data_dir": str(args.data_dir.resolve()),
         "stride": args.stride,
@@ -495,20 +495,50 @@ def main() -> None:
         "t_ref": args.t_ref,
         "layer_transition_xy_km": args.layer_transition_xy_km,
         "layer_transition_z_km": args.layer_transition_z_km,
+        "coarsening": "complete_blocks",
+        "input_sha256": input_sha256,
     }
+    initial_parameters = None
+    if args.initial_checkpoint is not None:
+        initial_parameters = load_initial_checkpoint(
+            args.initial_checkpoint,
+            data_config,
+            parameterization.config(),
+        )
+
+    output_dir = args.output_dir or Path("outputs") / time.strftime("%Y%m%d_%H%M%S")
+    output_dir.mkdir(parents=True)
+
+    result = run_inversion(
+        solver,
+        q_obs,
+        parameterization,
+        T_ref=args.t_ref,
+        maxiter=args.maxiter,
+        initial_parameters=initial_parameters,
+        lam_bottom=args.lam_bottom,
+        lam_k=args.lam_k,
+        lam_a=args.lam_a,
+        verbose=not args.quiet,
+    )
     metadata = {
-        "format_version": 1,
+        "format_version": CHECKPOINT_FORMAT_VERSION,
         "data": data_config,
         "parameterization": parameterization.config(),
         "objective": {
-            "lam_q_mean": args.lam_q_mean,
-            "lam_q_std": args.lam_q_std,
             "lam_bottom": args.lam_bottom,
             "lam_k": args.lam_k,
             "lam_a": args.lam_a,
         },
+        "run": {
+            "maxiter": args.maxiter,
+            "initial_checkpoint": (
+                None
+                if args.initial_checkpoint is None
+                else str(args.initial_checkpoint.resolve())
+            ),
+        },
     }
-    output_dir = args.output_dir or Path("outputs") / time.strftime("%Y%m%d_%H%M%S")
     save_run(output_dir, result, q_obs, metadata)
     print(f"Output directory: {output_dir}")
 

@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 
 from evaluation import evaluate_checkpoint
-from inversion import save_checkpoint
+from inversion import CHECKPOINT_FORMAT_VERSION, save_checkpoint
 from parameterization import DirectParameterization
 from tests.helpers import make_solver
 
@@ -25,7 +25,7 @@ class EvaluationTest(unittest.TestCase):
             a_mode="fixed",
         )
         metadata = {
-            "format_version": 1,
+            "format_version": CHECKPOINT_FORMAT_VERSION,
             "data": {
                 "data_dir": "unused",
                 "stride": 1,
@@ -34,6 +34,7 @@ class EvaluationTest(unittest.TestCase):
                 "t_ref": 1225.0,
                 "layer_transition_xy_km": 0.0,
                 "layer_transition_z_km": 0.0,
+                "input_sha256": {},
             },
             "parameterization": model.config(),
             "objective": {},
@@ -43,7 +44,7 @@ class EvaluationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint_path = Path(directory) / "checkpoint.npz"
             save_checkpoint(checkpoint_path, model.initial(), metadata)
-            with patch("evaluation.build_problem", return_value=(grid, solver, q_obs)):
+            with patch("evaluation.build_problem", return_value=(grid, solver, q_obs, {})):
                 _, _, fields, _, loaded_metadata = evaluate_checkpoint(checkpoint_path)
 
         np.testing.assert_allclose(fields["T_bot"], 1225.0)

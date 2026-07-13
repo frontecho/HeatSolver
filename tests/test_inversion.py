@@ -6,12 +6,51 @@ from pathlib import Path
 
 import numpy as np
 
-from inversion import evaluate_objective, load_checkpoint, run_inversion, save_checkpoint
+from inversion import (
+    CHECKPOINT_FORMAT_VERSION,
+    _coefficient_regularization,
+    evaluate_objective,
+    load_checkpoint,
+    load_initial_checkpoint,
+    run_inversion,
+    save_checkpoint,
+    verify_input_hashes,
+)
 from parameterization import DirectParameterization
 from tests.helpers import make_solver
 
 
 class DirectObjectiveTest(unittest.TestCase):
+    def test_regularization_matches_field_energy_across_modes(self) -> None:
+        dct = DirectParameterization(
+            2,
+            3,
+            bottom_mode="dct",
+            k_mode="fixed",
+            a_mode="fixed",
+            bottom_dct_x=1,
+            bottom_dct_y=1,
+        )
+        full = DirectParameterization(
+            2,
+            3,
+            bottom_mode="full",
+            k_mode="fixed",
+            a_mode="fixed",
+        )
+        weights = {"bottom": 1.0, "K": 0.0, "A": 0.0}
+        dct_value, _, _ = _coefficient_regularization(
+            np.array([2.0]),
+            dct,
+            weights,
+        )
+        full_value, _, _ = _coefficient_regularization(
+            np.full(full.size, 2.0),
+            full,
+            weights,
+        )
+        self.assertEqual(dct_value, full_value)
+
     def test_parameter_gradient_matches_directional_difference(self) -> None:
         solver, truth_bottom = make_solver(
             ny=2,
@@ -48,8 +87,6 @@ class DirectObjectiveTest(unittest.TestCase):
             model,
             parameters,
             T_ref=450.0,
-            lam_q_mean=0.2,
-            lam_q_std=0.1,
             lam_bottom=0.03,
             lam_k=0.04,
             lam_a=0.05,
@@ -63,8 +100,6 @@ class DirectObjectiveTest(unittest.TestCase):
                 model,
                 x,
                 T_ref=450.0,
-                lam_q_mean=0.2,
-                lam_q_std=0.1,
                 lam_bottom=0.03,
                 lam_k=0.04,
                 lam_a=0.05,
@@ -131,9 +166,16 @@ class DirectObjectiveTest(unittest.TestCase):
 
 
 class CheckpointTest(unittest.TestCase):
+    def test_input_hash_mismatch_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            verify_input_hashes({"grid.csv": "old"}, {"grid.csv": "new"})
+
     def test_npz_checkpoint_round_trip(self) -> None:
         parameters = np.array([1.0, -2.0, 3.5])
-        metadata = {"format_version": 1, "data": {"t_ref": 1225.0}}
+        metadata = {
+            "format_version": CHECKPOINT_FORMAT_VERSION,
+            "data": {"t_ref": 1225.0},
+        }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "checkpoint.npz"
             save_checkpoint(path, parameters, metadata)
@@ -141,6 +183,42 @@ class CheckpointTest(unittest.TestCase):
 
         np.testing.assert_array_equal(loaded_parameters, parameters)
         self.assertEqual(loaded_metadata, metadata)
+
+    def test_checkpoint_rejects_old_format(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.npz"
+            save_checkpoint(path, np.zeros(1), {"format_version": 1})
+            with self.assertRaises(ValueError):
+                load_checkpoint(path)
+
+    def test_initial_checkpoint_requires_exact_parameterization(self) -> None:
+        data = {"stride": 1}
+        first = DirectParameterization(
+            2,
+            2,
+            bottom_mode="dct",
+            k_mode="fixed",
+            a_mode="fixed",
+            bottom_dct_x=2,
+            bottom_dct_y=2,
+        )
+        second = DirectParameterization(
+            2,
+            2,
+            bottom_mode="full",
+            k_mode="fixed",
+            a_mode="fixed",
+        )
+        metadata = {
+            "format_version": CHECKPOINT_FORMAT_VERSION,
+            "data": data,
+            "parameterization": first.config(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.npz"
+            save_checkpoint(path, first.initial(), metadata)
+            with self.assertRaises(ValueError):
+                load_initial_checkpoint(path, data, second.config())
 
 
 if __name__ == "__main__":
