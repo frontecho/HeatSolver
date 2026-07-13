@@ -7,11 +7,16 @@ from pathlib import Path
 
 import numpy as np
 
-from data_loading import build_regular_index, fill_regular_grid, load_heat_flow_observations
+from data_loading import (
+    _block_reduce_nanmean,
+    build_regular_index,
+    fill_regular_grid,
+    load_heat_flow_observations,
+)
 
 
 class DataLoadingTest(unittest.TestCase):
-    def testbuild_regular_index_andfill_regular_grid(self) -> None:
+    def test_build_regular_index_and_fill_regular_grid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "grid.csv"
             with path.open("w", encoding="utf-8", newline="") as handle:
@@ -31,6 +36,21 @@ class DataLoadingTest(unittest.TestCase):
         np.testing.assert_array_equal(x_unique, np.array([0.0, 1.0]))
         np.testing.assert_array_equal(y_unique, np.array([0.0, 1.0]))
         np.testing.assert_allclose(arr, np.array([[10.0, 20.0], [30.0, 40.0]]))
+
+    def test_block_reduce_handles_partial_and_empty_blocks(self) -> None:
+        field = np.array(
+            [
+                [1.0, 3.0, np.nan],
+                [5.0, 7.0, np.nan],
+                [9.0, 11.0, np.nan],
+            ]
+        )
+        reduced = _block_reduce_nanmean(field, stride=2)
+        np.testing.assert_allclose(
+            reduced,
+            np.array([[4.0, np.nan], [10.0, np.nan]]),
+            equal_nan=True,
+        )
 
     def test_load_heat_flow_observations_maps_scatter_points_to_grid_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
