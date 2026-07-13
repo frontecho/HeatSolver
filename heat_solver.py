@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Finite-volume solver for 3-D steady-state heat conduction."""
+
+from __future__ import annotations
 
 import time
 
@@ -64,10 +64,19 @@ class HeatSolver:
         dz = np.diff(self.z_nodes_km)
         if not np.all(dz > 0.0) or not np.allclose(dz, dz[0]):
             raise ValueError("z_nodes_km must be uniformly increasing")
-        x_unique = np.unique(self.x)
-        y_unique = np.unique(self.y)
-        if x_unique.size < 2 or y_unique.size < 2:
+        if not np.allclose(self.x, self.x[0, :]) or not np.allclose(
+            self.y,
+            self.y[:, :1],
+        ):
+            raise ValueError("x and y must define a rectilinear grid")
+        x_unique = self.x[0]
+        y_unique = self.y[:, 0]
+        if self.nx < 2 or self.ny < 2:
             raise ValueError("x and y must each contain at least two coordinates")
+        dx = np.diff(x_unique)
+        dy = np.diff(y_unique)
+        if not np.allclose(dx, dx[0]) or not np.allclose(dy, dy[0]):
+            raise ValueError("x and y must be uniformly spaced")
 
         for name, field in (
             ("x", self.x),
@@ -81,14 +90,15 @@ class HeatSolver:
                 raise ValueError(f"{name} contains non-finite values")
 
         self.dz = float(dz[0] * 1e3)
-        self.dx = float(np.median(np.diff(x_unique)))
-        self.dy = float(np.median(np.diff(y_unique)))
+        self.dx = float(dx[0])
+        self.dy = float(dy[0])
         self.max_picard = max_picard
         self.picard_tol = picard_tol
         self.cg_rtol = cg_rtol
 
         self._prepare_matrix_topology()
         self._last_T: np.ndarray | None = None
+        self._preconditioner = None
         self.last_solve_info: dict[str, float | int] | None = None
         self._solve_calls = 0
 
@@ -210,6 +220,7 @@ class HeatSolver:
 
     def clear_warm_start(self) -> None:
         self._last_T = None
+        self._preconditioner = None
         self.last_solve_info = None
 
     def solve(
@@ -285,6 +296,7 @@ class HeatSolver:
             )
 
         self._last_T = T.copy()
+        self._preconditioner = preconditioner
         self.last_solve_info = {
             "solve_id": self._solve_calls,
             "picard_iterations": picard_iteration,
@@ -293,10 +305,6 @@ class HeatSolver:
             "elapsed_s": time.perf_counter() - start,
         }
         return T
-
-    @staticmethod
-    def _surface_temperature_gradient(T: np.ndarray, dz: float) -> np.ndarray:
-        return (-3.0 * T[:, :, 0] + 4.0 * T[:, :, 1] - T[:, :, 2]) / (2.0 * dz)
 
     def surface_heat_flow(self, T: np.ndarray, K0: np.ndarray | None = None) -> np.ndarray:
         """Return upward surface heat flow in mW/m2."""
@@ -307,17 +315,17 @@ class HeatSolver:
             T[:, :, :2],
         )
         face_k = self._harmonic_mean(k[:, :, 0], k[:, :, 1])
-        return 1e3 * face_k * self._surface_temperature_gradient(T, self.dz)
+        return 1e3 * face_k * (T[:, :, 1] - T[:, :, 0]) / self.dz
 
     @staticmethod
     def _add_face_vjp(
         T: np.ndarray,
         k: np.ndarray,
         dk_dT: np.ndarray,
-        dk_dK0: np.ndarray,
+        dk_dK0: np.ndarray | None,
         v: np.ndarray,
         grad_T: np.ndarray,
-        grad_K0: np.ndarray,
+        grad_K0: np.ndarray | None,
         axis: int,
         spacing: float,
     ) -> None:
@@ -344,21 +352,23 @@ class HeatSolver:
         grad_kb = common * (2.0 * ka**2 / denominator)
         grad_T[left_index] += grad_ka * dk_dT[left_index]
         grad_T[right_index] += grad_kb * dk_dT[right_index]
-        grad_K0[left_index] += grad_ka * dk_dK0[left_index]
-        grad_K0[right_index] += grad_kb * dk_dK0[right_index]
+        if grad_K0 is not None:
+            grad_K0[left_index] += grad_ka * dk_dK0[left_index]
+            grad_K0[right_index] += grad_kb * dk_dK0[right_index]
 
     def _residual_vjp(
         self,
         T: np.ndarray,
-        K0: np.ndarray,
         vector: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        k: np.ndarray,
+        dk_dT: np.ndarray,
+        dk_dK0: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
         """Return derivatives of ``vector.T @ residual`` with respect to T and K0."""
         v = np.zeros_like(T)
         v[:, :, 1:-1] = vector.reshape(self.ny, self.nx, self.nz - 2)
-        k, dk_dT, dk_dK0 = self._conductivity_terms(K0, self.c_ref, T)
         grad_T = np.zeros_like(T)
-        grad_K0 = np.zeros_like(K0)
+        grad_K0 = None if dk_dK0 is None else np.zeros_like(T)
         self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 2, self.dz)
         self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 0, self.dy)
         self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 1, self.dx)
@@ -386,14 +396,11 @@ class HeatSolver:
         kb = k[:, :, 1]
         denominator = np.maximum((ka + kb) ** 2, 1e-60)
         harmonic = 2.0 * ka * kb / np.maximum(ka + kb, 1e-30)
-        temperature_gradient = self._surface_temperature_gradient(T, self.dz)
+        gradient_weight = 1e3 * weight * harmonic / self.dz
+        direct_T[:, :, 0] -= gradient_weight
+        direct_T[:, :, 1] += gradient_weight
 
-        gradient_weight = 1e3 * weight * harmonic / (2.0 * self.dz)
-        direct_T[:, :, 0] -= 3.0 * gradient_weight
-        direct_T[:, :, 1] += 4.0 * gradient_weight
-        direct_T[:, :, 2] -= gradient_weight
-
-        harmonic_weight = 1e3 * weight * temperature_gradient
+        harmonic_weight = 1e3 * weight * (T[:, :, 1] - T[:, :, 0]) / self.dz
         grad_ka = harmonic_weight * (2.0 * kb**2 / denominator)
         grad_kb = harmonic_weight * (2.0 * ka**2 / denominator)
         direct_T[:, :, 0] += grad_ka * dk_dT[:, :, 0]
@@ -413,18 +420,11 @@ class HeatSolver:
         """Differentiate an output-weighted scalar with one nonlinear adjoint solve."""
         direct_T, direct_K0 = self._output_vjp(T, K0, grad_T, grad_q)
         rhs = direct_T[:, :, 1:-1].ravel()
+        k, dk_dT, dk_dK0 = self._conductivity_terms(K0, self.c_ref, T)
         adjoint_iterations = 0
         if np.any(rhs):
-            frozen_matrix, _ = self._build_matrix_and_rhs(
-                K0,
-                self.A_ref,
-                T,
-                T[:, :, -1],
-            )
-            preconditioner = pyamg.smoothed_aggregation_solver(frozen_matrix).aspreconditioner()
-
             def transpose_matvec(vector: np.ndarray) -> np.ndarray:
-                residual_grad_T, _ = self._residual_vjp(T, K0, vector)
+                residual_grad_T, _ = self._residual_vjp(T, vector, k, dk_dT)
                 return residual_grad_T[:, :, 1:-1].ravel()
 
             operator = spla.LinearOperator(
@@ -440,7 +440,7 @@ class HeatSolver:
             adjoint, info = spla.gmres(
                 operator,
                 rhs,
-                M=preconditioner,
+                M=self._preconditioner,
                 rtol=self.cg_rtol,
                 maxiter=500,
                 callback=count_iteration,
@@ -451,7 +451,13 @@ class HeatSolver:
         else:
             adjoint = np.zeros(self._n_unknowns, dtype=np.float64)
 
-        residual_grad_T, residual_grad_K0 = self._residual_vjp(T, K0, adjoint)
+        residual_grad_T, residual_grad_K0 = self._residual_vjp(
+            T,
+            adjoint,
+            k,
+            dk_dT,
+            dk_dK0,
+        )
         grad_T_bot = direct_T[:, :, -1] - residual_grad_T[:, :, -1]
         grad_K0 = direct_K0 - residual_grad_K0
         grad_A = np.zeros_like(T)

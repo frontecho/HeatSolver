@@ -9,7 +9,11 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from data_loading import THERMAL_PROPERTIES_FILENAME
+from data_loading import (
+    THERMAL_PROPERTIES_FILENAME,
+    load_heat_flow_observations,
+    load_surface_temperature_grid,
+)
 from lithosphere_model import (
     SEDIMENT_STRATUM_NAMES,
     THERMAL_LAYER_NAMES,
@@ -148,10 +152,24 @@ class LayerGridTest(unittest.TestCase):
 
     def test_layergrid_stride_reduces_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            paths = write_layergrid_csvs(Path(tmp), nx=4, ny=3)
+            paths = write_layergrid_csvs(Path(tmp), nx=5, ny=5)
             grid = LayerGrid(paths["grid"], paths["layer"], stride=2)
+            surface = load_surface_temperature_grid(
+                paths["grid"],
+                paths["thermal"],
+                stride=2,
+            )
+            heat_flow = load_heat_flow_observations(
+                paths["grid"],
+                paths["heatflow"],
+                stride=2,
+            )
 
         self.assertEqual(grid.shape, (2, 2))
+        self.assertEqual(surface.shape, grid.shape)
+        self.assertEqual(heat_flow.shape, grid.shape)
+        np.testing.assert_allclose(np.diff(grid.x[0]), 2_000.0)
+        np.testing.assert_allclose(np.diff(grid.y[:, 0]), 2_000.0)
         self.assertTrue(np.all(np.isfinite(grid.x)))
         self.assertTrue(np.all(np.isfinite(grid.y)))
 

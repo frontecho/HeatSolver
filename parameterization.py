@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Low-dimensional direct parameterization for geothermal inversion."""
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -10,6 +10,7 @@ from scipy.fft import idct
 from lithosphere_model import THERMAL_LAYER_NAMES
 
 PARAMETER_MODES = ("fixed", "dct", "full")
+PARAMETER_LAYOUT = 2
 
 
 class DCTBasis:
@@ -21,24 +22,32 @@ class DCTBasis:
         if self.modes_y < 1 or self.modes_x < 1:
             raise ValueError("DCT mode counts must be positive")
         self.size = self.modes_y * self.modes_x
+        self.scale = np.sqrt(ny * nx)
         self.basis_y = idct(
-            np.eye(ny, dtype=np.float64)[:, : self.modes_y],
+            np.eye(ny, self.modes_y, dtype=np.float64),
             axis=0,
             norm="ortho",
         )
         self.basis_x = idct(
-            np.eye(nx, dtype=np.float64)[:, : self.modes_x],
+            np.eye(nx, self.modes_x, dtype=np.float64),
             axis=0,
             norm="ortho",
+        )
+        spatial_envelope = self.scale * np.multiply.outer(
+            np.sum(np.abs(self.basis_y), axis=1),
+            np.sum(np.abs(self.basis_x), axis=1),
+        ) - 1.0
+        self.spatial_bound_scale = (
+            0.0 if self.size == 1 else 1.0 / np.max(spatial_envelope)
         )
 
     def decode(self, coefficients: np.ndarray) -> np.ndarray:
         matrix = np.asarray(coefficients).reshape(self.modes_y, self.modes_x)
-        return self.basis_y @ matrix @ self.basis_x.T
+        return self.scale * (self.basis_y @ matrix @ self.basis_x.T)
 
     def decode_layers(self, coefficients: np.ndarray) -> np.ndarray:
         matrices = np.asarray(coefficients).reshape(-1, self.modes_y, self.modes_x)
-        return np.einsum(
+        return self.scale * np.einsum(
             "ay,lyx,bx->lab",
             self.basis_y,
             matrices,
@@ -47,10 +56,10 @@ class DCTBasis:
         )
 
     def adjoint(self, field: np.ndarray) -> np.ndarray:
-        return (self.basis_y.T @ field @ self.basis_x).ravel()
+        return (self.scale * self.basis_y.T @ field @ self.basis_x).ravel()
 
     def adjoint_layers(self, fields: np.ndarray) -> np.ndarray:
-        return np.einsum(
+        return self.scale * np.einsum(
             "ay,lab,bx->lyx",
             self.basis_y,
             fields,
@@ -116,17 +125,35 @@ class DirectParameterization:
         if mode == "fixed":
             return 0
         field_size = self.ny * self.nx if mode == "full" else basis.size
-        return self.n_layers * (1 + field_size)
+        return self.n_layers * field_size
 
     def initial(self) -> np.ndarray:
         return np.zeros(self.size, dtype=np.float64)
 
     def bounds(self) -> list[tuple[float, float]]:
-        result: list[tuple[float, float]] = []
-        result.extend([(-self.bottom_bound_C, self.bottom_bound_C)] * (self.bottom_slice.stop - self.bottom_slice.start))
-        result.extend([(-self.k_log_bound, self.k_log_bound)] * (self.k_slice.stop - self.k_slice.start))
-        result.extend([(-self.a_log_bound, self.a_log_bound)] * (self.a_slice.stop - self.a_slice.start))
-        return result
+        return [
+            *self._mode_bounds(self.bottom_mode, self.bottom_dct, self.bottom_bound_C, 1),
+            *self._mode_bounds(self.k_mode, self.k_dct, self.k_log_bound, self.n_layers),
+            *self._mode_bounds(self.a_mode, self.a_dct, self.a_log_bound, self.n_layers),
+        ]
+
+    def _mode_bounds(
+        self,
+        mode: str,
+        basis: DCTBasis | None,
+        bound: float,
+        fields: int,
+    ) -> list[tuple[float, float]]:
+        if mode == "fixed":
+            return []
+        if mode == "full":
+            return [(-bound, bound)] * (fields * self.ny * self.nx)
+        spatial_bound = bound * basis.spatial_bound_scale
+        field_bounds = [
+            (-bound, bound),
+            *[(-spatial_bound, spatial_bound)] * (basis.size - 1),
+        ]
+        return field_bounds * fields
 
     def _decode_bottom(self, coefficients: np.ndarray) -> np.ndarray:
         if self.bottom_mode == "fixed":
@@ -143,13 +170,9 @@ class DirectParameterization:
     ) -> np.ndarray:
         if mode == "fixed":
             return np.zeros((self.n_layers, self.ny, self.nx), dtype=np.float64)
-        means = coefficients[: self.n_layers, None, None]
-        field_coefficients = coefficients[self.n_layers :]
         if mode == "full":
-            fields = field_coefficients.reshape(self.n_layers, self.ny, self.nx)
-        else:
-            fields = basis.decode_layers(field_coefficients)
-        return means + fields
+            return coefficients.reshape(self.n_layers, self.ny, self.nx)
+        return basis.decode_layers(coefficients)
 
     def _apply_property(
         self,
@@ -183,12 +206,8 @@ class DirectParameterization:
             "T_bot": T_bot,
             "K0": self._apply_property(solver, solver.K0_ref, self.k_mode, K_log_xy),
             "A": self._apply_property(solver, solver.A_ref, self.a_mode, A_log_xy),
-            "T_bot_delta": T_bot_delta,
             "K_log_xy": K_log_xy,
             "A_log_xy": A_log_xy,
-            "bottom_coeff": bottom_coeff,
-            "K_coeff": k_coeff,
-            "A_coeff": a_coeff,
         }
 
     def _property_pullback(
@@ -210,12 +229,9 @@ class DirectParameterization:
                 * np.exp(log_xy[index, :, :, None])
             )
             grad_log[index] = np.sum(field_gradient * derivative, axis=2)
-        mean_gradient = np.sum(grad_log, axis=(1, 2))
         if mode == "full":
-            field_coeff_gradient = grad_log.ravel()
-        else:
-            field_coeff_gradient = basis.adjoint_layers(grad_log)
-        return np.concatenate([mean_gradient, field_coeff_gradient])
+            return grad_log.ravel()
+        return basis.adjoint_layers(grad_log)
 
     def pullback(
         self,
@@ -264,8 +280,15 @@ class DirectParameterization:
             "bottom_bound_C": self.bottom_bound_C,
             "k_log_bound": self.k_log_bound,
             "a_log_bound": self.a_log_bound,
+            "parameter_layout": PARAMETER_LAYOUT,
+            "dct_normalization": "rms",
         }
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> DirectParameterization:
+        config = dict(config)
+        if config.pop("parameter_layout") != PARAMETER_LAYOUT:
+            raise ValueError("unsupported parameter layout")
+        if config.pop("dct_normalization") != "rms":
+            raise ValueError("unsupported DCT normalization")
         return cls(**config)

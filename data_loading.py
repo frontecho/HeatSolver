@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Load the grids and observations used by direct thermal inversion."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -39,19 +39,15 @@ def fill_regular_grid(
     return field
 
 
-def _block_reduce_nanmean(field: np.ndarray, stride: int) -> np.ndarray:
+def block_reduce_nanmean(field: np.ndarray, stride: int) -> np.ndarray:
     ny, nx = field.shape
-    out_ny = (ny + stride - 1) // stride
-    out_nx = (nx + stride - 1) // stride
-    padded = np.zeros((out_ny * stride, out_nx * stride), dtype=np.float64)
-    valid = np.zeros_like(padded, dtype=bool)
-    finite = np.isfinite(field)
-    padded[:ny, :nx] = np.where(finite, field, 0.0)
-    valid[:ny, :nx] = finite
-    blocks = padded.reshape(out_ny, stride, out_nx, stride)
-    valid_blocks = valid.reshape(out_ny, stride, out_nx, stride)
-    sums = blocks.sum(axis=(1, 3))
-    counts = valid_blocks.sum(axis=(1, 3))
+    out_ny = ny // stride
+    out_nx = nx // stride
+    field = field[: out_ny * stride, : out_nx * stride]
+    blocks = field.reshape(out_ny, stride, out_nx, stride)
+    finite = np.isfinite(blocks)
+    sums = np.where(finite, blocks, 0.0).sum(axis=(1, 3))
+    counts = finite.sum(axis=(1, 3))
     return np.divide(
         sums,
         counts,
@@ -79,7 +75,7 @@ def load_surface_temperature_grid(
         rows,
         columns,
     )
-    return _block_reduce_nanmean(full, stride)
+    return block_reduce_nanmean(full, stride)
 
 
 def load_heat_flow_observations(
@@ -95,17 +91,23 @@ def load_heat_flow_observations(
     ).dropna()
     output = np.full(
         (
-            (y_unique.size + stride - 1) // stride,
-            (x_unique.size + stride - 1) // stride,
+            y_unique.size // stride,
+            x_unique.size // stride,
         ),
         np.nan,
     )
     grid_points = grid[["X", "Y"]].to_numpy(dtype=np.float64)
     observation_points = observations[["X", "Y"]].to_numpy(dtype=np.float64)
     nearest = cKDTree(grid_points).query(observation_points, k=1)[1]
-    observation_rows = rows[nearest] // stride
-    observation_columns = columns[nearest] // stride
-    values = observations["Heat_Flow"].to_numpy(dtype=np.float64)
+    observation_rows = rows[nearest]
+    observation_columns = columns[nearest]
+    inside = (
+        (observation_rows < output.shape[0] * stride)
+        & (observation_columns < output.shape[1] * stride)
+    )
+    observation_rows = observation_rows[inside] // stride
+    observation_columns = observation_columns[inside] // stride
+    values = observations["Heat_Flow"].to_numpy(dtype=np.float64)[inside]
     sums = np.zeros_like(output)
     counts = np.zeros_like(output)
     np.add.at(sums, (observation_rows, observation_columns), values)

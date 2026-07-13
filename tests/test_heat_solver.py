@@ -42,7 +42,33 @@ class HeatSolverTest(unittest.TestCase):
         expected = 10.0 + top_gradient * z - 1e-6 * z**2 / (2.0 * 2.5)
 
         np.testing.assert_allclose(T[0, 0], expected, atol=1e-7)
-        np.testing.assert_allclose(solver.surface_heat_flow(T), 2.5 * top_gradient * 1e3, atol=1e-7)
+        expected_q = 1e3 * (2.5 * top_gradient - 0.5 * 1e-6 * solver.dz)
+        np.testing.assert_allclose(solver.surface_heat_flow(T), expected_q, atol=1e-7)
+
+    def test_variable_conductivity_surface_flux_is_conservative(self) -> None:
+        solver, T_bot = make_solver(
+            ny=2,
+            nx=2,
+            nz=7,
+            bottom_temp=650.0,
+            K0=2.0,
+            c=4e-4,
+            max_picard=60,
+            picard_tol=1e-12,
+            cg_rtol=1e-12,
+        )
+        K0 = solver.K0_ref * np.linspace(1.0, 2.0, solver.nz)
+        T = solver.solve(T_bot, K0=K0, reuse_last=False)
+        k = solver._conductivity_from_temperature(K0, solver.c_ref, T)
+        face_flux = (
+            1e3
+            * solver._harmonic_mean(k[:, :, :-1], k[:, :, 1:])
+            * np.diff(T, axis=2)
+            / solver.dz
+        )
+
+        self.assertLess(float(np.ptp(face_flux)), 1e-8)
+        np.testing.assert_allclose(solver.surface_heat_flow(T, K0), face_flux[:, :, 0])
 
     def test_nonlinear_picard_residual(self) -> None:
         solver, T_bot = make_solver(
@@ -93,7 +119,8 @@ class HeatSolverTest(unittest.TestCase):
         direction_T = np.linspace(-0.3, 0.5, T.size).reshape(T.shape)
         direction_T[:, :, 0] = 0.0
         direction_K0 = np.linspace(-0.2, 0.1, K0.size).reshape(K0.shape)
-        grad_T, grad_K0 = solver._residual_vjp(T, K0, vector)
+        terms = solver._conductivity_terms(K0, solver.c_ref, T)
+        grad_T, grad_K0 = solver._residual_vjp(T, vector, *terms)
 
         def weighted_residual(T_value: np.ndarray, K0_value: np.ndarray) -> float:
             matrix, rhs = solver.build_frozen_system(
@@ -159,6 +186,21 @@ class HeatSolverTest(unittest.TestCase):
             minus[position][index] -= eps
             finite_difference = (objective(*plus) - objective(*minus)) / (2.0 * eps)
             np.testing.assert_allclose(adjoint, finite_difference, rtol=2e-5, atol=2e-7)
+
+    def test_nonuniform_horizontal_grid_is_rejected(self) -> None:
+        solver, _ = make_solver(ny=2, nx=3, nz=4)
+        x = solver.x.copy()
+        x[:, 2] = 3_000.0
+        with self.assertRaises(ValueError):
+            HeatSolver(
+                x=x,
+                y=solver.y,
+                z_nodes_km=solver.z_nodes_km,
+                surface_temp=solver.surface_temp,
+                K0_ref=solver.K0_ref,
+                c_ref=solver.c_ref,
+                A_ref=solver.A_ref,
+            )
 
 
 if __name__ == "__main__":

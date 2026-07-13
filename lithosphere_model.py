@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
 
+from data_loading import block_reduce_nanmean
+
 THERMAL_LAYER_NAMES = ["sediment", "upper_crust", "middle_crust", "lower_crust", "mantle"]
 SEDIMENT_STRATUM_NAMES = [
     "xinshengjie",
@@ -41,25 +43,16 @@ def _require_finite(name: str, arr: np.ndarray) -> None:
         raise ValueError(f"{name} contains NaN or inf values.")
 
 
-def _block_reduce_nanmean(arr: np.ndarray, stride: int) -> np.ndarray:
-    ny, nx = arr.shape
-    out = np.full(((ny + stride - 1) // stride, (nx + stride - 1) // stride), np.nan, dtype=float)
-    for i0 in range(0, ny, stride):
-        for j0 in range(0, nx, stride):
-            block = arr[i0 : i0 + stride, j0 : j0 + stride]
-            if np.isfinite(block).any():
-                out[i0 // stride, j0 // stride] = float(np.nanmean(block))
-    return out
-
-
 def _block_reduce_1d_nanmean(arr: np.ndarray, stride: int) -> np.ndarray:
     n = arr.shape[0]
-    out = np.full((n + stride - 1) // stride, np.nan, dtype=float)
-    for i0 in range(0, n, stride):
-        block = arr[i0 : i0 + stride]
-        if np.isfinite(block).any():
-            out[i0 // stride] = float(np.nanmean(block))
-    return out
+    blocks = arr[: n // stride * stride].reshape(-1, stride)
+    finite = np.isfinite(blocks)
+    return np.divide(
+        np.where(finite, blocks, 0.0).sum(axis=1),
+        finite.sum(axis=1),
+        out=np.full(blocks.shape[0], np.nan),
+        where=finite.any(axis=1),
+    )
 
 
 class LayerGrid:
@@ -160,18 +153,18 @@ class LayerGrid:
 
         # --- aggregate to coarse grid ---
         s = stride
-        self.lon          = _block_reduce_nanmean(lon_g, s)
-        self.lat          = _block_reduce_nanmean(lat_g, s)
+        self.lon          = block_reduce_nanmean(lon_g, s)
+        self.lat          = block_reduce_nanmean(lat_g, s)
         x_coarse          = _block_reduce_1d_nanmean(x_unique.astype(float), s)
         y_coarse          = _block_reduce_1d_nanmean(y_unique.astype(float), s)
         self.x            = np.broadcast_to(x_coarse[None, :], (y_coarse.size, x_coarse.size)).copy()
         self.y            = np.broadcast_to(y_coarse[:, None], (y_coarse.size, x_coarse.size)).copy()
-        self.sed_thick    = _block_reduce_nanmean(sed_g, s)
-        self.stratum_thick = {name: _block_reduce_nanmean(stratum_g[name], s) for name in SEDIMENT_STRATUM_NAMES} if stratum_csv is not None else None
-        self.uc_thick     = _block_reduce_nanmean(uc_g, s)
-        self.mc_thick     = _block_reduce_nanmean(mc_g, s)
-        self.lc_thick     = _block_reduce_nanmean(lc_g, s)
-        self.moho         = _block_reduce_nanmean(moho_g, s)
+        self.sed_thick    = block_reduce_nanmean(sed_g, s)
+        self.stratum_thick = {name: block_reduce_nanmean(stratum_g[name], s) for name in SEDIMENT_STRATUM_NAMES} if stratum_csv is not None else None
+        self.uc_thick     = block_reduce_nanmean(uc_g, s)
+        self.mc_thick     = block_reduce_nanmean(mc_g, s)
+        self.lc_thick     = block_reduce_nanmean(lc_g, s)
+        self.moho         = block_reduce_nanmean(moho_g, s)
         self.shape        = self.x.shape
 
     # convenience: depth of each interface at (i, j)
@@ -389,4 +382,3 @@ def build_reference_fields(
         A_ref=A,
         layer_masks=layer_masks,
     )
-
