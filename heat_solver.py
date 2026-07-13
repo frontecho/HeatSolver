@@ -1,45 +1,17 @@
 from __future__ import annotations
 
-"""Clean baseline 3-D steady-state heat conduction solver.
-
-Model
------
-Solve
-    -div( k(x, T) grad(T) ) = A(x)
-with
-    T = T_surf on the top
-    T = T_bot  on the bottom
-    dT/dn = 0  on the four side boundaries
-"""
+"""Finite-volume solver for 3-D steady-state heat conduction."""
 
 import time
-from typing import Optional
 
 import numpy as np
-import torch
+import pyamg
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-import pyamg
-from torch import nn
 
 
-# -----------------------------------------------------------------------------
-# Solver
-# -----------------------------------------------------------------------------
-
-class HeatSolver(nn.Module):
-    @staticmethod
-    def _conductivity_from_temperature(K0: np.ndarray, c: np.ndarray, T: np.ndarray) -> np.ndarray:
-        return K0 / np.maximum(1.0 + c * T, 0.1)
-
-    @staticmethod
-    def _harmonic_mean(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        return 2.0 * a * b / np.maximum(a + b, 1e-30)
-
-    @staticmethod
-    def _require_finite(name: str, arr: np.ndarray) -> None:
-        if not np.all(np.isfinite(arr)):
-            raise ValueError(f"{name} contains NaN or inf values.")
+class HeatSolver:
+    """Solve ``-div(k(T) grad(T)) = A`` with vertical Dirichlet boundaries."""
 
     def __init__(
         self,
@@ -53,718 +25,437 @@ class HeatSolver(nn.Module):
         A_ref: np.ndarray,
         layer_masks: dict[str, np.ndarray] | None = None,
         max_picard: int = 20,
-        picard_tol: float = 1e-5,
-        cg_rtol: float = 1e-8,
-        amg_rebuild_interval: Optional[int] = None,
+        picard_tol: float = 1e-6,
+        cg_rtol: float = 1e-9,
     ) -> None:
-        super().__init__()
-        self.x = np.asarray(x, dtype=float)
-        self.y = np.asarray(y, dtype=float)
-        self.z_nodes_km = np.asarray(z_nodes_km, dtype=float)
-        self.surface_temp = np.asarray(surface_temp, dtype=float)
-        self.K0_ref = np.asarray(K0_ref, dtype=float)
-        self.c_ref = np.asarray(c_ref, dtype=float)
-        self.A_ref = np.asarray(A_ref, dtype=float)
-        self.layer_masks = {} if layer_masks is None else {name: np.asarray(mask, dtype=float) for name, mask in layer_masks.items()}
+        self.x = np.asarray(x, dtype=np.float64)
+        self.y = np.asarray(y, dtype=np.float64)
+        self.z_nodes_km = np.asarray(z_nodes_km, dtype=np.float64)
+        self.surface_temp = np.asarray(surface_temp, dtype=np.float64)
+        self.K0_ref = np.asarray(K0_ref, dtype=np.float64)
+        self.c_ref = np.asarray(c_ref, dtype=np.float64)
+        self.A_ref = np.asarray(A_ref, dtype=np.float64)
+        self.layer_masks = {
+            name: np.asarray(mask, dtype=np.float64)
+            for name, mask in (layer_masks or {}).items()
+        }
 
         if self.surface_temp.ndim != 2:
-            raise ValueError("surface_temp must be a 2-D array.")
+            raise ValueError("surface_temp must be a 2-D array")
         self.ny, self.nx = self.surface_temp.shape
         self.nz = self.z_nodes_km.size
         if self.nz < 3:
-            raise ValueError("z_nodes_km must contain at least 3 nodes.")
+            raise ValueError("z_nodes_km must contain at least three nodes")
         if self.x.shape != (self.ny, self.nx) or self.y.shape != (self.ny, self.nx):
-            raise ValueError("x, y, and surface_temp must have matching 2-D shapes.")
-        field_shape = (self.ny, self.nx, self.nz)
-        for name, arr in [("K0_ref", self.K0_ref), ("c_ref", self.c_ref), ("A_ref", self.A_ref)]:
-            if arr.shape != field_shape:
-                raise ValueError(f"{name} must have shape {field_shape}, got {arr.shape}.")
+            raise ValueError("x, y, and surface_temp must have matching shapes")
+
+        self.field_shape = (self.ny, self.nx, self.nz)
+        for name, field in (
+            ("K0_ref", self.K0_ref),
+            ("c_ref", self.c_ref),
+            ("A_ref", self.A_ref),
+        ):
+            if field.shape != self.field_shape:
+                raise ValueError(f"{name} must have shape {self.field_shape}")
         for name, mask in self.layer_masks.items():
-            if mask.shape != field_shape:
-                raise ValueError(f"layer mask {name!r} must have shape {field_shape}, got {mask.shape}.")
+            if mask.shape != self.field_shape:
+                raise ValueError(f"layer mask {name!r} must have shape {self.field_shape}")
 
-        dz_vals = np.diff(self.z_nodes_km)
-        if not np.all(np.isfinite(self.z_nodes_km)) or not np.all(dz_vals > 0):
-            raise ValueError("z_nodes_km must be finite and strictly increasing.")
-        if not np.allclose(dz_vals, dz_vals[0]):
-            raise ValueError("HeatSolver requires uniform vertical spacing.")
-        dx_vals = np.diff(np.sort(np.unique(self.x[np.isfinite(self.x)])))
-        dy_vals = np.diff(np.sort(np.unique(self.y[np.isfinite(self.y)])))
-        if dx_vals.size == 0 or dy_vals.size == 0:
-            raise ValueError("x and y must contain at least two unique finite coordinates.")
+        dz = np.diff(self.z_nodes_km)
+        if not np.all(dz > 0.0) or not np.allclose(dz, dz[0]):
+            raise ValueError("z_nodes_km must be uniformly increasing")
+        x_unique = np.unique(self.x)
+        y_unique = np.unique(self.y)
+        if x_unique.size < 2 or y_unique.size < 2:
+            raise ValueError("x and y must each contain at least two coordinates")
 
-        self.dz = float(dz_vals[0] * 1e3)
-        self.z_max = float(self.z_nodes_km[-1] * 1e3)
-        self.dx = float(np.median(dx_vals))
-        self.dy = float(np.median(dy_vals))
+        for name, field in (
+            ("x", self.x),
+            ("y", self.y),
+            ("surface_temp", self.surface_temp),
+            ("K0_ref", self.K0_ref),
+            ("c_ref", self.c_ref),
+            ("A_ref", self.A_ref),
+        ):
+            if not np.all(np.isfinite(field)):
+                raise ValueError(f"{name} contains non-finite values")
+
+        self.dz = float(dz[0] * 1e3)
+        self.dx = float(np.median(np.diff(x_unique)))
+        self.dy = float(np.median(np.diff(y_unique)))
         self.max_picard = max_picard
         self.picard_tol = picard_tol
         self.cg_rtol = cg_rtol
-        self.amg_rebuild_interval = amg_rebuild_interval
 
-        self._require_finite("x", self.x)
-        self._require_finite("y", self.y)
-        self._require_finite("surface_temp", self.surface_temp)
-        self._require_finite("K0_ref", self.K0_ref)
-        self._require_finite("c_ref", self.c_ref)
-        self._require_finite("A_ref", self.A_ref)
-
-        self._built = True
+        self._prepare_matrix_topology()
+        self._last_T: np.ndarray | None = None
+        self.last_solve_info: dict[str, float | int] | None = None
         self._solve_calls = 0
-        self._last_T: Optional[np.ndarray] = None
-        self.last_solve_info: Optional[dict[str, float | int | bool]] = None
 
-    def _solve_sparse_system(
-        self,
-        A_mat: sp.csr_matrix,
-        rhs: np.ndarray,
-        x0: Optional[np.ndarray] = None,
-    ) -> tuple[np.ndarray, int]:
-        ml = pyamg.smoothed_aggregation_solver(A_mat)
-        num_iters = 0
+    @staticmethod
+    def _conductivity_terms(
+        K0: np.ndarray,
+        c: np.ndarray,
+        T: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        raw = 1.0 + c * T
+        denominator = np.maximum(raw, 0.1)
+        conductivity = K0 / denominator
+        dk_dT = np.where(raw > 0.1, -K0 * c / denominator**2, 0.0)
+        return conductivity, dk_dT, 1.0 / denominator
 
-        def _cb(_: np.ndarray) -> None:
-            nonlocal num_iters
-            num_iters += 1
+    @staticmethod
+    def _conductivity_from_temperature(
+        K0: np.ndarray,
+        c: np.ndarray,
+        T: np.ndarray,
+    ) -> np.ndarray:
+        return K0 / np.maximum(1.0 + c * T, 0.1)
 
-        sol, info = spla.cg(
-            A_mat,
-            rhs,
-            x0=x0,
-            M=ml.aspreconditioner(),
-            rtol=self.cg_rtol,
-            maxiter=500,
-            callback=_cb,
-        )
-        if info != 0:
-            raise RuntimeError(f"CG did not converge, info={info}")
-        if num_iters == 0:
-            num_iters = 1
-        return sol, num_iters
+    @staticmethod
+    def _harmonic_mean(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        return 2.0 * a * b / np.maximum(a + b, 1e-30)
 
-    def clear_warm_start(self) -> None:
-        self._last_T = None
-        self.last_solve_info = None
+    def _prepare_matrix_topology(self) -> None:
+        ny, nx, nz2 = self.ny, self.nx, self.nz - 2
+        ii = np.broadcast_to(np.arange(ny)[:, None, None], (ny, nx, nz2))
+        jj = np.broadcast_to(np.arange(nx)[None, :, None], (ny, nx, nz2))
+        kk = np.broadcast_to(np.arange(nz2)[None, None, :], (ny, nx, nz2))
 
-    # ------------------------------------------------------------------
-    # Matrix assembly
-    # ------------------------------------------------------------------
+        def flat(i: np.ndarray, j: np.ndarray, k: np.ndarray) -> np.ndarray:
+            return i * (nx * nz2) + j * nz2 + k
+
+        row = flat(ii, jj, kk).ravel()
+        self._zm = (kk > 0).ravel()
+        self._zp = (kk < nz2 - 1).ravel()
+        self._ym = (ii > 0).ravel()
+        self._yp = (ii < ny - 1).ravel()
+        self._xm = (jj > 0).ravel()
+        self._xp = (jj < nx - 1).ravel()
+
+        rows = [row[mask] for mask in (self._zm, self._zp, self._ym, self._yp, self._xm, self._xp)]
+        cols = [
+            flat(ii.ravel()[self._zm], jj.ravel()[self._zm], kk.ravel()[self._zm] - 1),
+            flat(ii.ravel()[self._zp], jj.ravel()[self._zp], kk.ravel()[self._zp] + 1),
+            flat(ii.ravel()[self._ym] - 1, jj.ravel()[self._ym], kk.ravel()[self._ym]),
+            flat(ii.ravel()[self._yp] + 1, jj.ravel()[self._yp], kk.ravel()[self._yp]),
+            flat(ii.ravel()[self._xm], jj.ravel()[self._xm] - 1, kk.ravel()[self._xm]),
+            flat(ii.ravel()[self._xp], jj.ravel()[self._xp] + 1, kk.ravel()[self._xp]),
+        ]
+        self._matrix_rows = np.concatenate([*rows, row])
+        self._matrix_cols = np.concatenate([*cols, row])
+        self._surface_rows = np.arange(ny * nx) * nz2
+        self._bottom_rows = self._surface_rows + nz2 - 1
+        self._n_unknowns = ny * nx * nz2
+
     def _build_matrix_and_rhs(
         self,
         K0: np.ndarray,
         A_source: np.ndarray,
-        T_iter: np.ndarray,
+        T: np.ndarray,
         T_bot: np.ndarray,
     ) -> tuple[sp.csr_matrix, np.ndarray]:
-        ny, nx, nz = self.ny, self.nx, self.nz
-        nz2 = nz - 2
-        T_surf = self.surface_temp
+        k = self._conductivity_from_temperature(K0, self.c_ref, T)
+        face_z = self._harmonic_mean(k[:, :, :-1], k[:, :, 1:])
+        face_y = self._harmonic_mean(k[:-1, :, :], k[1:, :, :])
+        face_x = self._harmonic_mean(k[:, :-1, :], k[:, 1:, :])
+        nz2 = self.nz - 2
 
-        k_node = self._conductivity_from_temperature(K0, self.c_ref, T_iter)
-        kfz = self._harmonic_mean(k_node[:, :, :-1], k_node[:, :, 1:])
-        kfx = self._harmonic_mean(k_node[:-1, :, :], k_node[1:, :, :])
-        kfy = self._harmonic_mean(k_node[:, :-1, :], k_node[:, 1:, :])
+        czm = face_z[:, :, :-1] / self.dz**2
+        czp = face_z[:, :, 1:] / self.dz**2
+        cym = np.zeros((self.ny, self.nx, nz2), dtype=np.float64)
+        cyp = np.zeros_like(cym)
+        cxm = np.zeros_like(cym)
+        cxp = np.zeros_like(cym)
+        cym[1:] = face_y[:, :, 1:-1] / self.dy**2
+        cyp[:-1] = face_y[:, :, 1:-1] / self.dy**2
+        cxm[:, 1:] = face_x[:, :, 1:-1] / self.dx**2
+        cxp[:, :-1] = face_x[:, :, 1:-1] / self.dx**2
+        diagonal = czm + czp + cym + cyp + cxm + cxp
 
-        def flat(i: np.ndarray, j: np.ndarray, k2: np.ndarray) -> np.ndarray:
-            return i * (nx * nz2) + j * nz2 + k2
-
-        ii = np.arange(ny)[:, None, None] * np.ones((1, nx, nz2), dtype=int)
-        jj = np.ones((ny, 1, nz2), dtype=int) * np.arange(nx)[None, :, None]
-        k2 = np.ones((ny, nx, 1), dtype=int) * np.arange(nz2)[None, None, :]
-        kk = k2 + 1
-        row = flat(ii, jj, k2).ravel()
-
-        rows, cols, vals = [], [], []
-
-        # z-
-        cf_zm = kfz[:, :, :-1][:, :, :nz2] / (self.dz * self.dz)
-        mask = (kk > 1).ravel()
-        rows.append(row[mask])
-        cols.append(flat(ii.ravel()[mask], jj.ravel()[mask], k2.ravel()[mask] - 1))
-        vals.append(-cf_zm.ravel()[mask])
-
-        # z+
-        cf_zp = kfz[:, :, 1:][:, :, :nz2] / (self.dz * self.dz)
-        mask = (kk < nz - 2).ravel()
-        rows.append(row[mask])
-        cols.append(flat(ii.ravel()[mask], jj.ravel()[mask], k2.ravel()[mask] + 1))
-        vals.append(-cf_zp.ravel()[mask])
-
-        # row axis (i) follows y, so use dy here
-        cf_xm = np.zeros((ny, nx, nz2), dtype=float)
-        cf_xm[1:, :, :] = kfx[:, :, 1:-1] / (self.dy * self.dy)
-        mask = (ii > 0).ravel()
-        rows.append(row[mask])
-        cols.append(flat(ii.ravel()[mask] - 1, jj.ravel()[mask], k2.ravel()[mask]))
-        vals.append(-cf_xm.ravel()[mask])
-
-        # row axis (i) follows y, so use dy here
-        cf_xp = np.zeros((ny, nx, nz2), dtype=float)
-        cf_xp[:-1, :, :] = kfx[:, :, 1:-1] / (self.dy * self.dy)
-        mask = (ii < ny - 1).ravel()
-        rows.append(row[mask])
-        cols.append(flat(ii.ravel()[mask] + 1, jj.ravel()[mask], k2.ravel()[mask]))
-        vals.append(-cf_xp.ravel()[mask])
-
-        # column axis (j) follows x, so use dx here
-        cf_ym = np.zeros((ny, nx, nz2), dtype=float)
-        cf_ym[:, 1:, :] = kfy[:, :, 1:-1] / (self.dx * self.dx)
-        mask = (jj > 0).ravel()
-        rows.append(row[mask])
-        cols.append(flat(ii.ravel()[mask], jj.ravel()[mask] - 1, k2.ravel()[mask]))
-        vals.append(-cf_ym.ravel()[mask])
-
-        # column axis (j) follows x, so use dx here
-        cf_yp = np.zeros((ny, nx, nz2), dtype=float)
-        cf_yp[:, :-1, :] = kfy[:, :, 1:-1] / (self.dx * self.dx)
-        mask = (jj < nx - 1).ravel()
-        rows.append(row[mask])
-        cols.append(flat(ii.ravel()[mask], jj.ravel()[mask] + 1, k2.ravel()[mask]))
-        vals.append(-cf_yp.ravel()[mask])
-
-        diag = (cf_zm + cf_zp + cf_xm + cf_xp + cf_ym + cf_yp).ravel()
-        rows.append(row)
-        cols.append(row)
-        vals.append(diag)
-
-        A_mat = sp.csr_matrix(
-            (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
-            shape=(ny * nx * nz2, ny * nx * nz2),
+        values = np.concatenate(
+            [
+                -czm.ravel()[self._zm],
+                -czp.ravel()[self._zp],
+                -cym.ravel()[self._ym],
+                -cyp.ravel()[self._yp],
+                -cxm.ravel()[self._xm],
+                -cxp.ravel()[self._xp],
+                diagonal.ravel(),
+            ]
+        )
+        matrix = sp.csr_matrix(
+            (values, (self._matrix_rows, self._matrix_cols)),
+            shape=(self._n_unknowns, self._n_unknowns),
         )
 
-        rhs = A_source[:, :, 1:-1].reshape(-1).copy()
-        coeff_surf = kfz[:, :, 0] / (self.dz * self.dz)
-        coeff_bot = kfz[:, :, -1] / (self.dz * self.dz)
-
-        idx_surf = np.arange(ny * nx) * nz2
-        idx_bot = np.arange(ny * nx) * nz2 + (nz2 - 1)
-        rhs[idx_surf] += (coeff_surf * T_surf).reshape(-1)
-        rhs[idx_bot] += (coeff_bot * T_bot).reshape(-1)
-
-        return A_mat, rhs
+        rhs = A_source[:, :, 1:-1].ravel().copy()
+        rhs[self._surface_rows] += (czm[:, :, 0] * self.surface_temp).ravel()
+        rhs[self._bottom_rows] += (czp[:, :, -1] * T_bot).ravel()
+        return matrix, rhs
 
     def build_frozen_system(
         self,
         T: np.ndarray,
         T_bot: np.ndarray,
-        K0: Optional[np.ndarray] = None,
-        A_source: Optional[np.ndarray] = None,
+        K0: np.ndarray | None = None,
+        A_source: np.ndarray | None = None,
     ) -> tuple[sp.csr_matrix, np.ndarray]:
-        if not self._built:
-            raise RuntimeError("HeatSolver reference fields were not initialized.")
-        K0_use = self.K0_ref if K0 is None else K0
-        A_use = self.A_ref if A_source is None else A_source
-        self._require_finite("T", T)
-        self._require_finite("T_bot", T_bot)
-        self._require_finite("K0", K0_use)
-        self._require_finite("A_source", A_use)
-        return self._build_matrix_and_rhs(K0_use, A_use, T, T_bot)
+        return self._build_matrix_and_rhs(
+            self.K0_ref if K0 is None else K0,
+            self.A_ref if A_source is None else A_source,
+            T,
+            T_bot,
+        )
 
-    # ------------------------------------------------------------------
-    # Forward solve
-    # ------------------------------------------------------------------
+    def clear_warm_start(self) -> None:
+        self._last_T = None
+        self.last_solve_info = None
+
     def solve(
         self,
         T_bot: np.ndarray,
-        K0: Optional[np.ndarray] = None,
-        A_source: Optional[np.ndarray] = None,
-        T_init: Optional[np.ndarray] = None,
+        K0: np.ndarray | None = None,
+        A_source: np.ndarray | None = None,
+        *,
+        T_init: np.ndarray | None = None,
         reuse_last: bool = True,
-        verbose: bool = False,
     ) -> np.ndarray:
-        if not self._built:
-            raise RuntimeError("HeatSolver reference fields were not initialized.")
-
-        K0_use = self.K0_ref if K0 is None else K0
-        A_use = self.A_ref if A_source is None else A_source
-        T_surf = self.surface_temp
-        n_unknowns = self.ny * self.nx * (self.nz - 2)
-        self._solve_calls += 1
-        solve_id = self._solve_calls
-
-        self._require_finite("T_bot", T_bot)
-        self._require_finite("T_surf", T_surf)
-        self._require_finite("K0", K0_use)
-        self._require_finite("A_source", A_use)
+        T_bot = np.asarray(T_bot, dtype=np.float64)
+        K0 = self.K0_ref if K0 is None else np.asarray(K0, dtype=np.float64)
+        A_source = self.A_ref if A_source is None else np.asarray(A_source, dtype=np.float64)
+        if T_bot.shape != (self.ny, self.nx):
+            raise ValueError(f"T_bot must have shape {(self.ny, self.nx)}")
+        if K0.shape != self.field_shape or A_source.shape != self.field_shape:
+            raise ValueError(f"K0 and A_source must have shape {self.field_shape}")
 
         if T_init is not None:
-            self._require_finite("T_init", T_init)
-            T = np.array(T_init, dtype=float, copy=True)
-        elif reuse_last and self._last_T is not None and self._last_T.shape == (self.ny, self.nx, self.nz):
+            T = np.asarray(T_init, dtype=np.float64).copy()
+        elif reuse_last and self._last_T is not None:
             T = self._last_T.copy()
         else:
-            alpha = np.linspace(0.0, 1.0, self.nz)
-            T = T_surf[:, :, None] * (1.0 - alpha) + T_bot[:, :, None] * alpha
-        T[:, :, 0] = T_surf
+            fraction = np.linspace(0.0, 1.0, self.nz)
+            T = self.surface_temp[:, :, None] * (1.0 - fraction) + T_bot[:, :, None] * fraction
+        if T.shape != self.field_shape:
+            raise ValueError(f"T_init must have shape {self.field_shape}")
+        T[:, :, 0] = self.surface_temp
         T[:, :, -1] = T_bot
-        solve_t0 = time.time()
-        converged = False
-        ml = None
-        cg_iters_total = 0
 
-        if verbose:
-            print(
-                f"Solve {solve_id} start: "
-                f"grid={self.ny}x{self.nx}x{self.nz}, unknowns={n_unknowns}, max_picard={self.max_picard}"
-            )
-            print(
-                f"Solve {solve_id} boundary temperatures: "
-                f"Tsurf={np.nanmin(T_surf):.1f}-{np.nanmax(T_surf):.1f} C, "
-                f"Tbot={np.nanmin(T_bot):.1f}-{np.nanmax(T_bot):.1f} C"
-            )
+        self._solve_calls += 1
+        start = time.perf_counter()
+        cg_iterations = 0
+        preconditioner = None
+        for picard_iteration in range(1, self.max_picard + 1):
+            matrix, rhs = self._build_matrix_and_rhs(K0, A_source, T, T_bot)
+            if preconditioner is None:
+                preconditioner = pyamg.smoothed_aggregation_solver(matrix).aspreconditioner()
+            iteration_count = 0
 
-        for it in range(self.max_picard):
-            A_mat, rhs = self._build_matrix_and_rhs(K0_use, A_use, T, T_bot)
-            rebuild_amg = (
-                ml is None
-                or (
-                    self.amg_rebuild_interval is not None
-                    and self.amg_rebuild_interval > 0
-                    and it % self.amg_rebuild_interval == 0
-                )
-            )
-            if rebuild_amg:
-                ml = pyamg.smoothed_aggregation_solver(A_mat)
-            cg_iters = 0
+            def count_iteration(_: np.ndarray) -> None:
+                nonlocal iteration_count
+                iteration_count += 1
 
-            def _cb(_: np.ndarray) -> None:
-                nonlocal cg_iters
-                cg_iters += 1
-
-            u_int, info = spla.cg(
-                A_mat,
+            interior, info = spla.cg(
+                matrix,
                 rhs,
-                x0=T[:, :, 1:-1].reshape(-1),
-                M=ml.aspreconditioner(),
+                x0=T[:, :, 1:-1].ravel(),
+                M=preconditioner,
                 rtol=self.cg_rtol,
                 maxiter=500,
-                callback=_cb,
+                callback=count_iteration,
             )
             if info != 0:
-                raise RuntimeError(f"CG did not converge, info={info}")
-            if cg_iters == 0:
-                cg_iters = 1
-            cg_iters_total += cg_iters
-
+                raise RuntimeError(f"CG did not converge: info={info}")
+            cg_iterations += max(iteration_count, 1)
             T_new = np.concatenate(
-                [T_surf[:, :, None], u_int.reshape(self.ny, self.nx, self.nz - 2), T_bot[:, :, None]],
+                [
+                    self.surface_temp[:, :, None],
+                    interior.reshape(self.ny, self.nx, self.nz - 2),
+                    T_bot[:, :, None],
+                ],
                 axis=2,
             )
-            rel = np.linalg.norm(T_new - T) / (np.linalg.norm(T_new) + 1e-30)
+            relative_change = np.linalg.norm(T_new - T) / np.linalg.norm(T_new)
             T = T_new
-            if rel < self.picard_tol:
-                converged = True
+            if relative_change < self.picard_tol:
                 break
+        else:
+            raise RuntimeError(
+                f"Picard iteration did not converge after {self.max_picard} iterations"
+            )
 
         self._last_T = T.copy()
         self.last_solve_info = {
-            "solve_id": solve_id,
-            "picard_iters": it + 1,
-            "cg_iters_total": cg_iters_total,
-            "converged": converged,
-            "final_rel": float(rel),
-            "total_time_s": float(time.time() - solve_t0),
+            "solve_id": self._solve_calls,
+            "picard_iterations": picard_iteration,
+            "cg_iterations": cg_iterations,
+            "relative_change": float(relative_change),
+            "elapsed_s": time.perf_counter() - start,
         }
-
-        if verbose:
-            status = "converged" if converged else "reached max_picard"
-            if self.amg_rebuild_interval is None:
-                amg_msg = "reused AMG after first Picard step"
-            elif self.amg_rebuild_interval > 0:
-                amg_msg = f"rebuilt AMG every {self.amg_rebuild_interval} Picard step(s)"
-            else:
-                amg_msg = "reused AMG after first Picard step"
-            print(
-                f"Solve {solve_id} done: "
-                f"{status}, iterations={it + 1}, rel={rel:.3e}, "
-                f"cg_iters={cg_iters_total}, total_time={time.time() - solve_t0:.2f}s, "
-                f"final_T={T.min():.1f}-{T.max():.1f} C, "
-                f"{amg_msg}"
-            )
-
         return T
 
-    # ------------------------------------------------------------------
-    # Heat flow
-    # ------------------------------------------------------------------
     @staticmethod
-    def _surface_temperature_gradient_np(T: np.ndarray, dz: float) -> np.ndarray:
+    def _surface_temperature_gradient(T: np.ndarray, dz: float) -> np.ndarray:
         return (-3.0 * T[:, :, 0] + 4.0 * T[:, :, 1] - T[:, :, 2]) / (2.0 * dz)
 
-    def surface_heat_flow_upward_np(self, T: np.ndarray, K0: Optional[np.ndarray] = None) -> np.ndarray:
-        """Return upward surface heat flow in mW/m^2."""
-        K0_use = self.K0_ref if K0 is None else K0
-        self._require_finite("T", T)
-        self._require_finite("K0", K0_use)
-        k_top_nodes = self._conductivity_from_temperature(K0_use[:, :, :2], self.c_ref[:, :, :2], T[:, :, :2])
-        k_top_face = self._harmonic_mean(k_top_nodes[:, :, 0], k_top_nodes[:, :, 1])
-        return k_top_face * self._surface_temperature_gradient_np(T, self.dz) * 1e3
+    def surface_heat_flow(self, T: np.ndarray, K0: np.ndarray | None = None) -> np.ndarray:
+        """Return upward surface heat flow in mW/m2."""
+        K0 = self.K0_ref if K0 is None else K0
+        k = self._conductivity_from_temperature(
+            K0[:, :, :2],
+            self.c_ref[:, :, :2],
+            T[:, :, :2],
+        )
+        face_k = self._harmonic_mean(k[:, :, 0], k[:, :, 1])
+        return 1e3 * face_k * self._surface_temperature_gradient(T, self.dz)
 
-    def forward(
+    @staticmethod
+    def _add_face_vjp(
+        T: np.ndarray,
+        k: np.ndarray,
+        dk_dT: np.ndarray,
+        dk_dK0: np.ndarray,
+        v: np.ndarray,
+        grad_T: np.ndarray,
+        grad_K0: np.ndarray,
+        axis: int,
+        spacing: float,
+    ) -> None:
+        left = [slice(None)] * 3
+        right = [slice(None)] * 3
+        left[axis] = slice(None, -1)
+        right[axis] = slice(1, None)
+        left_index = tuple(left)
+        right_index = tuple(right)
+
+        ka = k[left_index]
+        kb = k[right_index]
+        denominator = np.maximum((ka + kb) ** 2, 1e-60)
+        harmonic = 2.0 * ka * kb / np.maximum(ka + kb, 1e-30)
+        delta_v = v[left_index] - v[right_index]
+        delta_T = T[left_index] - T[right_index]
+
+        direct = delta_v * harmonic / spacing**2
+        grad_T[left_index] += direct
+        grad_T[right_index] -= direct
+
+        common = delta_v * delta_T / spacing**2
+        grad_ka = common * (2.0 * kb**2 / denominator)
+        grad_kb = common * (2.0 * ka**2 / denominator)
+        grad_T[left_index] += grad_ka * dk_dT[left_index]
+        grad_T[right_index] += grad_kb * dk_dT[right_index]
+        grad_K0[left_index] += grad_ka * dk_dK0[left_index]
+        grad_K0[right_index] += grad_kb * dk_dK0[right_index]
+
+    def _residual_vjp(
         self,
-        T_bot: torch.Tensor,
-        K0: Optional[torch.Tensor] = None,
-        A_source: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not self._built:
-            raise RuntimeError("HeatSolver reference fields were not initialized.")
-        K0_use = K0
-        A_use = A_source
-        if K0_use is None:
-            K0_use = torch.as_tensor(self.K0_ref, dtype=T_bot.dtype, device=T_bot.device)
-        else:
-            K0_use = K0_use.to(device=T_bot.device, dtype=T_bot.dtype)
-        if A_use is None:
-            A_use = torch.as_tensor(self.A_ref, dtype=T_bot.dtype, device=T_bot.device)
-        else:
-            A_use = A_use.to(device=T_bot.device, dtype=T_bot.dtype)
-        return _HeatSolveFunction.apply(T_bot, K0_use, A_use, self)
-
-
-class _HeatSolveFunction(torch.autograd.Function):
-    @staticmethod
-    def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
-        return tensor.detach().cpu().numpy().astype(np.float64, copy=False)
-
-    @staticmethod
-    def _harmonic_mean_torch(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        return 2.0 * a * b / torch.clamp(a + b, min=1e-30)
-
-    @staticmethod
-    def _conductivity_from_temperature_np(K0: np.ndarray, c: np.ndarray, T: np.ndarray) -> np.ndarray:
-        return K0 / np.maximum(1.0 + c * T, 0.1)
-
-    @staticmethod
-    def _conductivity_from_temperature_torch(
-        K0: torch.Tensor,
-        c: torch.Tensor,
-        T: torch.Tensor,
-    ) -> torch.Tensor:
-        return K0 / torch.clamp(1.0 + c * T, min=0.1)
-
-    @staticmethod
-    def _surface_temperature_gradient_torch(T: torch.Tensor, dz: float) -> torch.Tensor:
-        return (-3.0 * T[:, :, 0] + 4.0 * T[:, :, 1] - T[:, :, 2]) / (2.0 * dz)
-
-    @staticmethod
-    def _surface_heat_flow_upward_torch(
-        solver: HeatSolver,
-        T: torch.Tensor,
-        K0: torch.Tensor,
-        c_ref: torch.Tensor,
-    ) -> torch.Tensor:
-        k_top_nodes = _HeatSolveFunction._conductivity_from_temperature_torch(K0[:, :, :2], c_ref[:, :, :2], T[:, :, :2])
-        k_top_face = _HeatSolveFunction._harmonic_mean_torch(k_top_nodes[:, :, 0], k_top_nodes[:, :, 1])
-        return k_top_face * _HeatSolveFunction._surface_temperature_gradient_torch(T, solver.dz) * 1e3
-
-    @staticmethod
-    def _frozen_residual_torch(
-        solver: HeatSolver,
-        T: torch.Tensor,
-        T_bot: torch.Tensor,
-        K0: torch.Tensor,
-        A_source: torch.Tensor,
-        c_ref: torch.Tensor,
-        T_surf: torch.Tensor,
-    ) -> torch.Tensor:
-        dz2 = solver.dz * solver.dz
-        dx2 = solver.dx * solver.dx
-        dy2 = solver.dy * solver.dy
-
-        T_full = torch.cat([T_surf[:, :, None], T[:, :, 1:-1], T_bot[:, :, None]], dim=2)
-        T_int = T_full[:, :, 1:-1]
-        k_node = _HeatSolveFunction._conductivity_from_temperature_torch(K0, c_ref, T_full)
-        kfz = _HeatSolveFunction._harmonic_mean_torch(k_node[:, :, :-1], k_node[:, :, 1:])
-        kfx = _HeatSolveFunction._harmonic_mean_torch(k_node[:-1, :, :], k_node[1:, :, :])
-        kfy = _HeatSolveFunction._harmonic_mean_torch(k_node[:, :-1, :], k_node[:, 1:, :])
-
-        cf_zm = kfz[:, :, :-1] / dz2
-        cf_zp = kfz[:, :, 1:] / dz2
-        residual = (cf_zm + cf_zp) * T_int
-        residual[:, :, 1:] = residual[:, :, 1:] - cf_zm[:, :, 1:] * T_int[:, :, :-1]
-        residual[:, :, :-1] = residual[:, :, :-1] - cf_zp[:, :, :-1] * T_int[:, :, 1:]
-
-        coeff_row = kfx[:, :, 1:-1] / dy2
-        residual[:-1, :, :] = residual[:-1, :, :] + coeff_row * (T_int[:-1, :, :] - T_int[1:, :, :])
-        residual[1:, :, :] = residual[1:, :, :] + coeff_row * (T_int[1:, :, :] - T_int[:-1, :, :])
-
-        coeff_col = kfy[:, :, 1:-1] / dx2
-        residual[:, :-1, :] = residual[:, :-1, :] + coeff_col * (T_int[:, :-1, :] - T_int[:, 1:, :])
-        residual[:, 1:, :] = residual[:, 1:, :] + coeff_col * (T_int[:, 1:, :] - T_int[:, :-1, :])
-
-        residual = residual - A_source[:, :, 1:-1]
-        residual[:, :, 0] = residual[:, :, 0] - (kfz[:, :, 0] / dz2) * T_surf
-        residual[:, :, -1] = residual[:, :, -1] - (kfz[:, :, -1] / dz2) * T_bot
-        return residual
-
-    @staticmethod
-    def _corrected_adjoint_rhs(
-        solver: HeatSolver,
         T: np.ndarray,
         K0: np.ndarray,
-        c_ref: np.ndarray,
-        grad_T_full: np.ndarray,
-        lambda0: np.ndarray,
-    ) -> np.ndarray:
-        k_field = _HeatSolveFunction._conductivity_from_temperature_np(K0, c_ref, T)
-        inv_1cT = 1.0 / np.maximum(1.0 + c_ref * T, 0.1)
-        dk_dT = -k_field * c_ref * inv_1cT
+        vector: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return derivatives of ``vector.T @ residual`` with respect to T and K0."""
+        v = np.zeros_like(T)
+        v[:, :, 1:-1] = vector.reshape(self.ny, self.nx, self.nz - 2)
+        k, dk_dT, dk_dK0 = self._conductivity_terms(K0, self.c_ref, T)
+        grad_T = np.zeros_like(T)
+        grad_K0 = np.zeros_like(K0)
+        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 2, self.dz)
+        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 0, self.dy)
+        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 1, self.dx)
+        return grad_T, grad_K0
 
-        v_full = np.zeros_like(T)
-        v_full[:, :, 1:-1] = lambda0
-        MTv = np.zeros_like(T)
+    def _output_vjp(
+        self,
+        T: np.ndarray,
+        K0: np.ndarray,
+        grad_T: np.ndarray | None,
+        grad_q: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        direct_T = np.zeros_like(T) if grad_T is None else np.asarray(grad_T, dtype=np.float64).copy()
+        direct_K0 = np.zeros_like(K0)
+        if grad_q is None:
+            return direct_T, direct_K0
 
-        a = k_field[:, :, :-1]
-        b = k_field[:, :, 1:]
-        ab2 = np.maximum((a + b) ** 2, 1e-60)
-        u_diff = (T[:, :, :-1] - T[:, :, 1:]) / (solver.dz ** 2)
-        v_diff = v_full[:, :, :-1] - v_full[:, :, 1:]
-        MTv[:, :, :-1] += 2.0 * b ** 2 / ab2 * dk_dT[:, :, :-1] * u_diff * v_diff
-        MTv[:, :, 1:] += 2.0 * a ** 2 / ab2 * dk_dT[:, :, 1:] * u_diff * v_diff
-
-        a = k_field[:-1, :, :]
-        b = k_field[1:, :, :]
-        ab2 = np.maximum((a + b) ** 2, 1e-60)
-        u_diff = (T[:-1, :, :] - T[1:, :, :]) / (solver.dy ** 2)
-        v_diff = v_full[:-1, :, :] - v_full[1:, :, :]
-        MTv[:-1, :, :] += 2.0 * b ** 2 / ab2 * dk_dT[:-1, :, :] * u_diff * v_diff
-        MTv[1:, :, :] += 2.0 * a ** 2 / ab2 * dk_dT[1:, :, :] * u_diff * v_diff
-
-        a = k_field[:, :-1, :]
-        b = k_field[:, 1:, :]
-        ab2 = np.maximum((a + b) ** 2, 1e-60)
-        u_diff = (T[:, :-1, :] - T[:, 1:, :]) / (solver.dx ** 2)
-        v_diff = v_full[:, :-1, :] - v_full[:, 1:, :]
-        MTv[:, :-1, :] += 2.0 * b ** 2 / ab2 * dk_dT[:, :-1, :] * u_diff * v_diff
-        MTv[:, 1:, :] += 2.0 * a ** 2 / ab2 * dk_dT[:, 1:, :] * u_diff * v_diff
-
-        return grad_T_full[:, :, 1:-1].reshape(-1) - MTv[:, :, 1:-1].reshape(-1)
-
-    @staticmethod
-    def _direct_output_grads(
-        solver: HeatSolver,
-        T_saved: torch.Tensor,
-        K0_saved: torch.Tensor,
-        grad_T: Optional[torch.Tensor],
-        grad_q: Optional[torch.Tensor],
-        needs_K0: bool,
-        work_dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        device = T_saved.device
-        c_ref_t = torch.as_tensor(solver.c_ref, dtype=work_dtype, device=device)
-        with torch.enable_grad():
-            T_var = T_saved.detach().to(dtype=work_dtype).requires_grad_(True)
-            K0_var = K0_saved.detach().to(dtype=work_dtype).requires_grad_(needs_K0)
-
-            output_scalar = torch.zeros((), dtype=work_dtype, device=device)
-            if grad_T is not None:
-                output_scalar = output_scalar + (grad_T.to(dtype=work_dtype) * T_var).sum()
-            if grad_q is not None:
-                q_var = _HeatSolveFunction._surface_heat_flow_upward_torch(solver, T_var, K0_var, c_ref_t)
-                output_scalar = output_scalar + (grad_q.to(dtype=work_dtype) * q_var).sum()
-
-            inputs: list[torch.Tensor] = [T_var]
-            if needs_K0:
-                inputs.append(K0_var)
-            grads = torch.autograd.grad(output_scalar, inputs, allow_unused=True)
-
-        return grads[0], grads[1] if needs_K0 else None
-
-    @staticmethod
-    def _solve_adjoint_state(
-        solver: HeatSolver,
-        T_np: np.ndarray,
-        T_bot_np: np.ndarray,
-        K0_np: np.ndarray,
-        A_np: np.ndarray,
-        grad_T_full_np: np.ndarray,
-    ) -> np.ndarray:
-        adj_rhs = grad_T_full_np[:, :, 1:-1].reshape(-1)
-        A_mat, _ = solver.build_frozen_system(T_np, T_bot_np, K0=K0_np, A_source=A_np)
-        A_t = A_mat.transpose().tocsr()
-        lambda0_np, _ = solver._solve_sparse_system(A_t, adj_rhs)
-        corrected_rhs = _HeatSolveFunction._corrected_adjoint_rhs(
-            solver,
-            T_np,
-            K0_np,
-            np.asarray(solver.c_ref, dtype=np.float64),
-            grad_T_full_np,
-            lambda0_np.reshape(solver.ny, solver.nx, solver.nz - 2),
+        weight = np.asarray(grad_q, dtype=np.float64)
+        k, dk_dT, dk_dK0 = self._conductivity_terms(
+            K0[:, :, :2],
+            self.c_ref[:, :, :2],
+            T[:, :, :2],
         )
-        lambda_np, _ = solver._solve_sparse_system(A_t, corrected_rhs, x0=lambda0_np)
-        return lambda_np.reshape(solver.ny, solver.nx, solver.nz - 2)
+        ka = k[:, :, 0]
+        kb = k[:, :, 1]
+        denominator = np.maximum((ka + kb) ** 2, 1e-60)
+        harmonic = 2.0 * ka * kb / np.maximum(ka + kb, 1e-30)
+        temperature_gradient = self._surface_temperature_gradient(T, self.dz)
 
-    @staticmethod
-    def _residual_input_grads(
-        solver: HeatSolver,
-        T_saved: torch.Tensor,
-        T_bot_saved: torch.Tensor,
-        K0_saved: torch.Tensor,
-        A_saved: torch.Tensor,
-        lambda_t: torch.Tensor,
-        needs_T_bot: bool,
-        needs_K0: bool,
-        needs_A: bool,
-        work_dtype: torch.dtype,
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        if not (needs_T_bot or needs_K0 or needs_A):
-            return None, None, None
+        gradient_weight = 1e3 * weight * harmonic / (2.0 * self.dz)
+        direct_T[:, :, 0] -= 3.0 * gradient_weight
+        direct_T[:, :, 1] += 4.0 * gradient_weight
+        direct_T[:, :, 2] -= gradient_weight
 
-        device = T_saved.device
-        T_bot_var = T_bot_saved.detach().to(dtype=work_dtype).requires_grad_(needs_T_bot)
-        K0_var = K0_saved.detach().to(dtype=work_dtype).requires_grad_(needs_K0)
-        A_var = A_saved.detach().to(dtype=work_dtype).requires_grad_(needs_A)
-        c_ref_t = torch.as_tensor(solver.c_ref, dtype=work_dtype, device=device)
-        T_surf_t = torch.as_tensor(solver.surface_temp, dtype=work_dtype, device=device)
+        harmonic_weight = 1e3 * weight * temperature_gradient
+        grad_ka = harmonic_weight * (2.0 * kb**2 / denominator)
+        grad_kb = harmonic_weight * (2.0 * ka**2 / denominator)
+        direct_T[:, :, 0] += grad_ka * dk_dT[:, :, 0]
+        direct_T[:, :, 1] += grad_kb * dk_dT[:, :, 1]
+        direct_K0[:, :, 0] += grad_ka * dk_dK0[:, :, 0]
+        direct_K0[:, :, 1] += grad_kb * dk_dK0[:, :, 1]
+        return direct_T, direct_K0
 
-        with torch.enable_grad():
-            residual = _HeatSolveFunction._frozen_residual_torch(
-                solver,
-                T_saved.detach().to(dtype=work_dtype),
-                T_bot_var,
-                K0_var,
-                A_var,
-                c_ref_t,
-                T_surf_t,
+    def adjoint_gradient(
+        self,
+        T: np.ndarray,
+        K0: np.ndarray,
+        *,
+        grad_T: np.ndarray | None = None,
+        grad_q: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Differentiate an output-weighted scalar with one nonlinear adjoint solve."""
+        direct_T, direct_K0 = self._output_vjp(T, K0, grad_T, grad_q)
+        rhs = direct_T[:, :, 1:-1].ravel()
+        adjoint_iterations = 0
+        if np.any(rhs):
+            frozen_matrix, _ = self._build_matrix_and_rhs(
+                K0,
+                self.A_ref,
+                T,
+                T[:, :, -1],
             )
-            correction_scalar = (lambda_t * residual).sum()
+            preconditioner = pyamg.smoothed_aggregation_solver(frozen_matrix).aspreconditioner()
 
-            inputs: list[torch.Tensor] = []
-            if needs_T_bot:
-                inputs.append(T_bot_var)
-            if needs_K0:
-                inputs.append(K0_var)
-            if needs_A:
-                inputs.append(A_var)
-            grads = torch.autograd.grad(correction_scalar, inputs, allow_unused=True)
+            def transpose_matvec(vector: np.ndarray) -> np.ndarray:
+                residual_grad_T, _ = self._residual_vjp(T, K0, vector)
+                return residual_grad_T[:, :, 1:-1].ravel()
 
-        grad_T_bot = grad_K0 = grad_A = None
-        idx = 0
-        if needs_T_bot:
-            grad_T_bot = grads[idx]
-            idx += 1
-        if needs_K0:
-            grad_K0 = grads[idx]
-            idx += 1
-        if needs_A:
-            grad_A = grads[idx]
+            operator = spla.LinearOperator(
+                (self._n_unknowns, self._n_unknowns),
+                matvec=transpose_matvec,
+                dtype=np.float64,
+            )
+
+            def count_iteration(_: float) -> None:
+                nonlocal adjoint_iterations
+                adjoint_iterations += 1
+
+            adjoint, info = spla.gmres(
+                operator,
+                rhs,
+                M=preconditioner,
+                rtol=self.cg_rtol,
+                maxiter=500,
+                callback=count_iteration,
+                callback_type="legacy",
+            )
+            if info != 0:
+                raise RuntimeError(f"GMRES adjoint did not converge: info={info}")
+        else:
+            adjoint = np.zeros(self._n_unknowns, dtype=np.float64)
+
+        residual_grad_T, residual_grad_K0 = self._residual_vjp(T, K0, adjoint)
+        grad_T_bot = direct_T[:, :, -1] - residual_grad_T[:, :, -1]
+        grad_K0 = direct_K0 - residual_grad_K0
+        grad_A = np.zeros_like(T)
+        grad_A[:, :, 1:-1] = adjoint.reshape(self.ny, self.nx, self.nz - 2)
+        if self.last_solve_info is not None:
+            self.last_solve_info["adjoint_iterations"] = adjoint_iterations
         return grad_T_bot, grad_K0, grad_A
-
-    @staticmethod
-    def _combine_input_grads(
-        solver: HeatSolver,
-        T_bot_saved: torch.Tensor,
-        K0_saved: torch.Tensor,
-        A_saved: torch.Tensor,
-        grad_T: Optional[torch.Tensor],
-        grad_T_full_np: np.ndarray,
-        direct_grad_K0: Optional[torch.Tensor],
-        correction_grads: tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]],
-        needs_T_bot: bool,
-        needs_K0: bool,
-        needs_A: bool,
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        device = T_bot_saved.device
-        corr_T_bot, corr_K0, corr_A = correction_grads
-        grad_T_bot_out = grad_K0_out = grad_A_out = None
-
-        if needs_T_bot:
-            grad_T_bot_np = np.zeros((solver.ny, solver.nx), dtype=np.float64)
-            if grad_T is not None:
-                grad_T_bot_np = grad_T_bot_np + grad_T_full_np[:, :, -1]
-            grad_T_bot_out = torch.as_tensor(grad_T_bot_np, dtype=T_bot_saved.dtype, device=device)
-            if corr_T_bot is not None:
-                grad_T_bot_out = grad_T_bot_out - corr_T_bot.to(dtype=T_bot_saved.dtype)
-
-        if needs_K0:
-            grad_K0_out = direct_grad_K0
-            if corr_K0 is not None:
-                grad_K0_out = grad_K0_out - corr_K0 if grad_K0_out is not None else -corr_K0
-            grad_K0_out = grad_K0_out.to(dtype=K0_saved.dtype)
-
-        if needs_A:
-            grad_A_out = torch.zeros_like(A_saved)
-            if corr_A is not None:
-                grad_A_out = grad_A_out - corr_A.to(dtype=torch.float64)
-            grad_A_out = grad_A_out.to(dtype=A_saved.dtype)
-
-        return grad_T_bot_out, grad_K0_out, grad_A_out
-
-    @staticmethod
-    def forward(
-        ctx,
-        T_bot: torch.Tensor,
-        K0: torch.Tensor,
-        A_source: torch.Tensor,
-        solver: HeatSolver,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        T_bot_np = _HeatSolveFunction._to_numpy(T_bot)
-        K0_np = _HeatSolveFunction._to_numpy(K0)
-        A_np = _HeatSolveFunction._to_numpy(A_source)
-
-        T_np = solver.solve(T_bot_np, K0=K0_np, A_source=A_np, verbose=False)
-        q_np = solver.surface_heat_flow_upward_np(T_np, K0=K0_np)
-
-        T_out = torch.as_tensor(T_np, dtype=T_bot.dtype, device=T_bot.device)
-        q_out = torch.as_tensor(q_np, dtype=T_bot.dtype, device=T_bot.device)
-
-        ctx.solver = solver
-        ctx.save_for_backward(T_bot.detach(), K0.detach(), A_source.detach(), T_out.detach())
-        return T_out, q_out
-
-    @staticmethod
-    def backward(
-        ctx,
-        grad_T: Optional[torch.Tensor],
-        grad_q: Optional[torch.Tensor],
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], None]:
-        solver: HeatSolver = ctx.solver
-        T_bot_saved, K0_saved, A_saved, T_saved = ctx.saved_tensors
-        needs_T_bot, needs_K0, needs_A, _ = ctx.needs_input_grad
-        if grad_T is None and grad_q is None:
-            return None, None, None, None
-
-        work_dtype = torch.float64
-        T_np = _HeatSolveFunction._to_numpy(T_saved.to(dtype=work_dtype))
-        T_bot_np = _HeatSolveFunction._to_numpy(T_bot_saved.to(dtype=work_dtype))
-        K0_np = _HeatSolveFunction._to_numpy(K0_saved.to(dtype=work_dtype))
-        A_np = _HeatSolveFunction._to_numpy(A_saved.to(dtype=work_dtype))
-
-        direct_grad_T, direct_grad_K0 = _HeatSolveFunction._direct_output_grads(
-            solver,
-            T_saved,
-            K0_saved,
-            grad_T,
-            grad_q,
-            needs_K0,
-            work_dtype,
-        )
-        grad_T_full_np = _HeatSolveFunction._to_numpy(direct_grad_T)
-        lambda_np = _HeatSolveFunction._solve_adjoint_state(solver, T_np, T_bot_np, K0_np, A_np, grad_T_full_np)
-        lambda_t = torch.as_tensor(lambda_np, dtype=work_dtype, device=T_saved.device)
-        correction_grads = _HeatSolveFunction._residual_input_grads(
-            solver,
-            T_saved,
-            T_bot_saved,
-            K0_saved,
-            A_saved,
-            lambda_t,
-            needs_T_bot,
-            needs_K0,
-            needs_A,
-            work_dtype,
-        )
-        grad_T_bot_out, grad_K0_out, grad_A_out = _HeatSolveFunction._combine_input_grads(
-            solver,
-            T_bot_saved,
-            K0_saved,
-            A_saved,
-            grad_T,
-            grad_T_full_np,
-            direct_grad_K0,
-            correction_grads,
-            needs_T_bot,
-            needs_K0,
-            needs_A,
-        )
-        return grad_T_bot_out, grad_K0_out, grad_A_out, None
