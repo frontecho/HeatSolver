@@ -1,26 +1,20 @@
 [project]
 name = "heatsolver"
 version = "0.1.0"
-description = "Add your description here"
+description = "Direct PDE-constrained geothermal inversion for the Ordos Basin"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.4",
-    "openpyxl>=3.1.5",
     "pandas>=3.0.2",
     "pyamg>=5.3.0",
-    "pytest>=9.0.3",
     "scipy>=1.17.1",
-    "torch>=2.11.0",
 ]
 
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-cu128" },
-]
+[dependency-groups]
+dev = ["pytest>=9.0.3"]
 
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
