@@ -1,231 +1,271 @@
 from __future__ import annotations
 
+"""Low-dimensional direct parameterization for geothermal inversion."""
+
 from typing import Any
 
 import numpy as np
-import torch
 from scipy.fft import idct
-from torch import nn
 
 from lithosphere_model import THERMAL_LAYER_NAMES
 
 PARAMETER_MODES = ("fixed", "dct", "full")
 
 
-class DCTField:
-    def __init__(self, ny: int, nx: int, x: int = 5, y: int = 5):
+class DCTBasis:
+    def __init__(self, ny: int, nx: int, modes_y: int, modes_x: int) -> None:
         self.ny = ny
         self.nx = nx
-        self.x = min(x, nx)
-        self.y = min(y, ny)
-        if self.x < 1 or self.y < 1:
-            raise ValueError(f"Invalid DCT shape for grid {ny}x{nx}: x={x}, y={y}")
-        self.n_params = self.x * self.y
+        self.modes_y = min(modes_y, ny)
+        self.modes_x = min(modes_x, nx)
+        if self.modes_y < 1 or self.modes_x < 1:
+            raise ValueError("DCT mode counts must be positive")
+        self.size = self.modes_y * self.modes_x
+        self.basis_y = idct(
+            np.eye(ny, dtype=np.float64)[:, : self.modes_y],
+            axis=0,
+            norm="ortho",
+        )
+        self.basis_x = idct(
+            np.eye(nx, dtype=np.float64)[:, : self.modes_x],
+            axis=0,
+            norm="ortho",
+        )
 
-        basis_y = np.zeros((ny, self.y), dtype=np.float64)
-        basis_x = np.zeros((nx, self.x), dtype=np.float64)
-        eye_y = np.eye(ny, dtype=np.float64)
-        eye_x = np.eye(nx, dtype=np.float64)
-        for i in range(self.y):
-            basis_y[:, i] = idct(eye_y[:, i], norm="ortho")
-        for j in range(self.x):
-            basis_x[:, j] = idct(eye_x[:, j], norm="ortho")
+    def decode(self, coefficients: np.ndarray) -> np.ndarray:
+        matrix = np.asarray(coefficients).reshape(self.modes_y, self.modes_x)
+        return self.basis_y @ matrix @ self.basis_x.T
 
-        self._basis_y_np = basis_y
-        self._basis_x_np = basis_x
+    def decode_layers(self, coefficients: np.ndarray) -> np.ndarray:
+        matrices = np.asarray(coefficients).reshape(-1, self.modes_y, self.modes_x)
+        return np.einsum(
+            "ay,lyx,bx->lab",
+            self.basis_y,
+            matrices,
+            self.basis_x,
+            optimize=True,
+        )
 
-    def decode_torch(self, coeff: torch.Tensor, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-        coeff = coeff.to(dtype=dtype, device=device).reshape(self.y, self.x)
-        basis_y = torch.as_tensor(self._basis_y_np, dtype=dtype, device=device)
-        basis_x = torch.as_tensor(self._basis_x_np, dtype=dtype, device=device)
-        return basis_y @ coeff @ basis_x.transpose(0, 1)
+    def adjoint(self, field: np.ndarray) -> np.ndarray:
+        return (self.basis_y.T @ field @ self.basis_x).ravel()
 
-
-class LayeredDCTField:
-    def __init__(self, n_layers: int, ny: int, nx: int, x: int, y: int):
-        self.n_layers = n_layers
-        self.dct = DCTField(ny, nx, x, y)
-        self.x = self.dct.x
-        self.y = self.dct.y
-        self.n_params_per_layer = self.dct.n_params
-        self.n_params = n_layers * self.n_params_per_layer
-
-    def decode_torch(self, coeffs: torch.Tensor, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-        coeffs = coeffs.to(dtype=dtype, device=device).reshape(self.n_layers, self.n_params_per_layer)
-        return torch.stack([self.dct.decode_torch(coeffs[i], dtype=dtype, device=device) for i in range(self.n_layers)])
+    def adjoint_layers(self, fields: np.ndarray) -> np.ndarray:
+        return np.einsum(
+            "ay,lab,bx->lyx",
+            self.basis_y,
+            fields,
+            self.basis_x,
+            optimize=True,
+        ).ravel()
 
 
-class ParameterModelBase(nn.Module):
+class DirectParameterization:
     def __init__(
         self,
         ny: int,
         nx: int,
         *,
-        bottom_x: int = 5,
-        bottom_y: int = 5,
-        k_property_x: int = 5,
-        k_property_y: int = 5,
-        a_property_x: int = 5,
-        a_property_y: int = 5,
-        k_property_scale: float = 0.7,
-        a_property_scale: float = 0.7,
-        alpha_scale: float = 300.0,
         bottom_mode: str = "dct",
         k_mode: str = "fixed",
         a_mode: str = "fixed",
+        bottom_dct_x: int = 3,
+        bottom_dct_y: int = 3,
+        k_dct_x: int = 5,
+        k_dct_y: int = 5,
+        a_dct_x: int = 5,
+        a_dct_y: int = 5,
+        bottom_bound_C: float = 800.0,
+        k_log_bound: float = 0.7,
+        a_log_bound: float = 0.7,
     ) -> None:
-        super().__init__()
         self.ny = ny
         self.nx = nx
-        self.bottom_mode = bottom_mode.lower()
-        self.k_mode = k_mode.lower()
-        self.a_mode = a_mode.lower()
-        self.k_property_scale = k_property_scale
-        self.a_property_scale = a_property_scale
-        self.alpha_scale = alpha_scale
+        self.n_layers = len(THERMAL_LAYER_NAMES)
+        self.bottom_mode = bottom_mode
+        self.k_mode = k_mode
+        self.a_mode = a_mode
+        for mode in (bottom_mode, k_mode, a_mode):
+            if mode not in PARAMETER_MODES:
+                raise ValueError(f"unknown parameter mode: {mode}")
 
-        self.register_buffer("_zero", torch.zeros(0, dtype=torch.float64))
-        self.n_property_layers = len(THERMAL_LAYER_NAMES)
-        self.bottom_dct = LayeredDCTField(1, ny, nx, bottom_x, bottom_y) if self.bottom_mode == "dct" else None
-        self.k_dct = LayeredDCTField(self.n_property_layers, ny, nx, k_property_x, k_property_y) if self.k_mode == "dct" else None
-        self.a_dct = LayeredDCTField(self.n_property_layers, ny, nx, a_property_x, a_property_y) if self.a_mode == "dct" else None
-        self.n_bottom_field = self._field_param_count(self.bottom_mode, self.bottom_dct, 1, "bottom")
-        self.n_k_field = self._field_param_count(self.k_mode, self.k_dct, self.n_property_layers, "K")
-        self.n_a_field = self._field_param_count(self.a_mode, self.a_dct, self.n_property_layers, "A")
-        self.n_k_mean = self.n_property_layers if self.k_mode != "fixed" else 0
-        self.n_a_mean = self.n_property_layers if self.a_mode != "fixed" else 0
-        self.n_k_params = self.n_k_mean + self.n_k_field
-        self.n_a_params = self.n_a_mean + self.n_a_field
+        self.bottom_dct = DCTBasis(ny, nx, bottom_dct_y, bottom_dct_x) if bottom_mode == "dct" else None
+        self.k_dct = DCTBasis(ny, nx, k_dct_y, k_dct_x) if k_mode == "dct" else None
+        self.a_dct = DCTBasis(ny, nx, a_dct_y, a_dct_x) if a_mode == "dct" else None
+        self.bottom_bound_C = bottom_bound_C
+        self.k_log_bound = k_log_bound
+        self.a_log_bound = a_log_bound
 
-    def _field_param_count(self, mode: str, dct: LayeredDCTField | None, n_layers: int, name: str) -> int:
+        offset = 0
+        self.bottom_slice, offset = self._allocate(offset, self._bottom_size())
+        self.k_slice, offset = self._allocate(offset, self._property_size(k_mode, self.k_dct))
+        self.a_slice, offset = self._allocate(offset, self._property_size(a_mode, self.a_dct))
+        self.size = offset
+
+    @staticmethod
+    def _allocate(offset: int, size: int) -> tuple[slice, int]:
+        return slice(offset, offset + size), offset + size
+
+    def _bottom_size(self) -> int:
+        if self.bottom_mode == "fixed":
+            return 0
+        if self.bottom_mode == "full":
+            return self.ny * self.nx
+        return self.bottom_dct.size
+
+    def _property_size(self, mode: str, basis: DCTBasis | None) -> int:
         if mode == "fixed":
             return 0
-        if mode == "full":
-            return n_layers * self.ny * self.nx
-        if mode == "dct":
-            if dct is None:
-                raise ValueError(f"DCT {name} mode is missing its DCT field.")
-            return dct.n_params
-        raise ValueError(f"Unsupported {name} mode: {mode}")
+        field_size = self.ny * self.nx if mode == "full" else basis.size
+        return self.n_layers * (1 + field_size)
 
-    def _scaled_coeff(self, mode: str, raw: torch.Tensor | None, scale: float, name: str) -> torch.Tensor:
-        if mode in ("dct", "full"):
-            if raw is None:
-                raise ValueError(f"{name} {mode} mode is missing coefficients.")
-            return scale * torch.tanh(raw)
-        if raw is None:
-            return torch.zeros(0, dtype=self._zero.dtype, device=self._zero.device)
-        return torch.zeros(0, dtype=raw.dtype, device=raw.device)
+    def initial(self) -> np.ndarray:
+        return np.zeros(self.size, dtype=np.float64)
 
-    def _decode_coeff(
+    def bounds(self) -> list[tuple[float, float]]:
+        result: list[tuple[float, float]] = []
+        result.extend([(-self.bottom_bound_C, self.bottom_bound_C)] * (self.bottom_slice.stop - self.bottom_slice.start))
+        result.extend([(-self.k_log_bound, self.k_log_bound)] * (self.k_slice.stop - self.k_slice.start))
+        result.extend([(-self.a_log_bound, self.a_log_bound)] * (self.a_slice.stop - self.a_slice.start))
+        return result
+
+    def _decode_bottom(self, coefficients: np.ndarray) -> np.ndarray:
+        if self.bottom_mode == "fixed":
+            return np.zeros((self.ny, self.nx), dtype=np.float64)
+        if self.bottom_mode == "full":
+            return coefficients.reshape(self.ny, self.nx)
+        return self.bottom_dct.decode(coefficients)
+
+    def _decode_property(
         self,
         mode: str,
-        dct: LayeredDCTField | None,
-        coeff: torch.Tensor,
-        fixed_shape: tuple[int, ...],
-        full_shape: tuple[int, ...],
-        *,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> torch.Tensor:
+        basis: DCTBasis | None,
+        coefficients: np.ndarray,
+    ) -> np.ndarray:
         if mode == "fixed":
-            return torch.zeros(fixed_shape, dtype=dtype, device=device)
-        coeff = coeff.to(dtype=dtype, device=device)
+            return np.zeros((self.n_layers, self.ny, self.nx), dtype=np.float64)
+        means = coefficients[: self.n_layers, None, None]
+        field_coefficients = coefficients[self.n_layers :]
         if mode == "full":
-            return coeff.reshape(full_shape)
-        if dct is None:
-            raise ValueError("DCT mode is missing its DCT field.")
-        return dct.decode_torch(coeff, dtype=dtype, device=device)
+            fields = field_coefficients.reshape(self.n_layers, self.ny, self.nx)
+        else:
+            fields = basis.decode_layers(field_coefficients)
+        return means + fields
 
-    def _decode_property_log_xy(
-        self,
-        mode: str,
-        dct: LayeredDCTField | None,
-        coeff: torch.Tensor,
-        *,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> torch.Tensor:
-        zero_shape = (self.n_property_layers, self.ny, self.nx)
-        if mode == "fixed":
-            return torch.zeros(zero_shape, dtype=dtype, device=device)
-        coeff = coeff.to(dtype=dtype, device=device)
-        mean = coeff[: self.n_property_layers]
-        field_coeff = coeff[self.n_property_layers :]
-        field_xy = self._decode_coeff(
-            mode,
-            dct,
-            field_coeff,
-            zero_shape,
-            zero_shape,
-            dtype=dtype,
-            device=device,
-        )
-        return mean.reshape(self.n_property_layers, 1, 1) + field_xy
-
-    def apply_log_multiplier_torch(
+    def _apply_property(
         self,
         solver: Any,
         reference: np.ndarray,
         mode: str,
-        *,
-        log_xy: torch.Tensor | None = None,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        mode = mode.lower()
-        missing = [name for name in THERMAL_LAYER_NAMES if name not in solver.layer_masks]
-        if mode != "fixed" and missing:
-            raise ValueError(f"Solver is missing layer masks required for parameterization: {missing}")
-        field = torch.as_tensor(reference, dtype=dtype, device=device).clone()
-        zero_xy = torch.zeros((len(THERMAL_LAYER_NAMES), solver.ny, solver.nx), dtype=dtype, device=device)
+        log_xy: np.ndarray,
+    ) -> np.ndarray:
         if mode == "fixed":
-            return field, zero_xy
-        if log_xy is None:
-            raise ValueError(f"{mode} property mode requires per-layer 2-D log multipliers.")
-        log_xy = log_xy.to(dtype=dtype, device=device)
-        multiplier = torch.zeros_like(field)
-        for i, name in enumerate(THERMAL_LAYER_NAMES):
-            weight = torch.as_tensor(solver.layer_masks[name], dtype=dtype, device=device)
-            if bool(torch.any(weight > 0.0)):
-                scale = torch.exp(log_xy[i][:, :, None])
-                multiplier = multiplier + weight * scale
-        return field * multiplier, log_xy
+            return reference.copy()
+        missing = [name for name in THERMAL_LAYER_NAMES if name not in solver.layer_masks]
+        if missing:
+            raise ValueError(f"missing layer masks: {missing}")
+        multiplier = np.zeros_like(reference)
+        for index, name in enumerate(THERMAL_LAYER_NAMES):
+            multiplier += solver.layer_masks[name] * np.exp(log_xy[index, :, :, None])
+        return reference * multiplier
 
-    def decode_configured_parameter_fields(
-        self,
-        solver: Any,
-        coeffs: dict[str, Any],
-        *,
-        T_ref: float,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
-        T_bot_delta_layers = self._decode_coeff(self.bottom_mode, self.bottom_dct, coeffs["bottom_coeff"], (1, self.ny, self.nx), (1, self.ny, self.nx), dtype=dtype, device=device)
-        K_log_xy = self._decode_property_log_xy(self.k_mode, self.k_dct, coeffs["K_coeff"], dtype=dtype, device=device)
-        A_log_xy = self._decode_property_log_xy(self.a_mode, self.a_dct, coeffs["A_coeff"], dtype=dtype, device=device)
-        T_bot_delta = T_bot_delta_layers[0]
-        T_bot = torch.full((solver.ny, solver.nx), float(T_ref), dtype=dtype, device=device) if self.bottom_mode == "fixed" else float(T_ref) + T_bot_delta
-
-        K0, _ = self.apply_log_multiplier_torch(
-            solver,
-            solver.K0_ref,
-            self.k_mode,
-            log_xy=K_log_xy,
-            dtype=dtype,
-            device=device,
-        )
-        A, _ = self.apply_log_multiplier_torch(
-            solver,
-            solver.A_ref,
-            self.a_mode,
-            log_xy=A_log_xy,
-            dtype=dtype,
-            device=device,
-        )
-        extras = {
+    def decode(self, solver: Any, parameters: np.ndarray, *, T_ref: float) -> dict[str, np.ndarray]:
+        parameters = np.asarray(parameters, dtype=np.float64)
+        if parameters.shape != (self.size,):
+            raise ValueError(f"parameters must have shape {(self.size,)}")
+        bottom_coeff = parameters[self.bottom_slice]
+        k_coeff = parameters[self.k_slice]
+        a_coeff = parameters[self.a_slice]
+        T_bot_delta = self._decode_bottom(bottom_coeff)
+        K_log_xy = self._decode_property(self.k_mode, self.k_dct, k_coeff)
+        A_log_xy = self._decode_property(self.a_mode, self.a_dct, a_coeff)
+        T_bot = np.full((self.ny, self.nx), T_ref) + T_bot_delta
+        return {
+            "T_bot": T_bot,
+            "K0": self._apply_property(solver, solver.K0_ref, self.k_mode, K_log_xy),
+            "A": self._apply_property(solver, solver.A_ref, self.a_mode, A_log_xy),
             "T_bot_delta": T_bot_delta,
             "K_log_xy": K_log_xy,
             "A_log_xy": A_log_xy,
+            "bottom_coeff": bottom_coeff,
+            "K_coeff": k_coeff,
+            "A_coeff": a_coeff,
         }
-        return T_bot, K0, A, extras
+
+    def _property_pullback(
+        self,
+        solver: Any,
+        reference: np.ndarray,
+        field_gradient: np.ndarray,
+        mode: str,
+        basis: DCTBasis | None,
+        log_xy: np.ndarray,
+    ) -> np.ndarray:
+        if mode == "fixed":
+            return np.zeros(0, dtype=np.float64)
+        grad_log = np.empty_like(log_xy)
+        for index, name in enumerate(THERMAL_LAYER_NAMES):
+            derivative = (
+                reference
+                * solver.layer_masks[name]
+                * np.exp(log_xy[index, :, :, None])
+            )
+            grad_log[index] = np.sum(field_gradient * derivative, axis=2)
+        mean_gradient = np.sum(grad_log, axis=(1, 2))
+        if mode == "full":
+            field_coeff_gradient = grad_log.ravel()
+        else:
+            field_coeff_gradient = basis.adjoint_layers(grad_log)
+        return np.concatenate([mean_gradient, field_coeff_gradient])
+
+    def pullback(
+        self,
+        solver: Any,
+        state: dict[str, np.ndarray],
+        grad_T_bot: np.ndarray,
+        grad_K0: np.ndarray,
+        grad_A: np.ndarray,
+    ) -> np.ndarray:
+        gradient = np.zeros(self.size, dtype=np.float64)
+        if self.bottom_mode == "full":
+            gradient[self.bottom_slice] = grad_T_bot.ravel()
+        elif self.bottom_mode == "dct":
+            gradient[self.bottom_slice] = self.bottom_dct.adjoint(grad_T_bot)
+        gradient[self.k_slice] = self._property_pullback(
+            solver,
+            solver.K0_ref,
+            grad_K0,
+            self.k_mode,
+            self.k_dct,
+            state["K_log_xy"],
+        )
+        gradient[self.a_slice] = self._property_pullback(
+            solver,
+            solver.A_ref,
+            grad_A,
+            self.a_mode,
+            self.a_dct,
+            state["A_log_xy"],
+        )
+        return gradient
+
+    def config(self) -> dict[str, int | float | str]:
+        return {
+            "ny": self.ny,
+            "nx": self.nx,
+            "bottom_mode": self.bottom_mode,
+            "k_mode": self.k_mode,
+            "a_mode": self.a_mode,
+            "bottom_dct_x": 0 if self.bottom_dct is None else self.bottom_dct.modes_x,
+            "bottom_dct_y": 0 if self.bottom_dct is None else self.bottom_dct.modes_y,
+            "k_dct_x": 0 if self.k_dct is None else self.k_dct.modes_x,
+            "k_dct_y": 0 if self.k_dct is None else self.k_dct.modes_y,
+            "a_dct_x": 0 if self.a_dct is None else self.a_dct.modes_x,
+            "a_dct_y": 0 if self.a_dct is None else self.a_dct.modes_y,
+            "bottom_bound_C": self.bottom_bound_C,
+            "k_log_bound": self.k_log_bound,
+            "a_log_bound": self.a_log_bound,
+        }
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> DirectParameterization:
+        return cls(**config)

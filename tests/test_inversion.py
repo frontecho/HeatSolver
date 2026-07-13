@@ -1,142 +1,146 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
-import torch
 
-from direct_parameter import DirectParameterModel
-from inversion import (
-    _build_optimizer,
-    _tensor_to_numpy,
-    run_inversion,
-)
+from inversion import evaluate_objective, load_checkpoint, run_inversion, save_checkpoint
+from parameterization import DirectParameterization
 from tests.helpers import make_solver
 
 
-class InversionHelperTest(unittest.TestCase):
-    def test_tensor_to_numpy_handles_tensor_and_missing_values(self) -> None:
-        arr = _tensor_to_numpy(torch.tensor([1.0, 2.0]))
-        np.testing.assert_allclose(arr, np.array([1.0, 2.0]))
-        self.assertEqual(_tensor_to_numpy(None).shape, (0,))
+class DirectObjectiveTest(unittest.TestCase):
+    def test_parameter_gradient_matches_directional_difference(self) -> None:
+        solver, truth_bottom = make_solver(
+            ny=2,
+            nx=2,
+            nz=5,
+            bottom_temp=480.0,
+            c=5e-4,
+            A=1e-6,
+            max_picard=60,
+            picard_tol=1e-12,
+            cg_rtol=1e-12,
+        )
+        truth_temperature = solver.solve(truth_bottom, reuse_last=False)
+        q_obs = solver.surface_heat_flow(truth_temperature)
+        model = DirectParameterization(
+            2,
+            2,
+            bottom_mode="dct",
+            k_mode="dct",
+            a_mode="dct",
+            bottom_dct_x=1,
+            bottom_dct_y=1,
+            k_dct_x=1,
+            k_dct_y=1,
+            a_dct_x=1,
+            a_dct_y=1,
+        )
+        rng = np.random.default_rng(7)
+        parameters = rng.normal(0.0, 0.02, model.size)
+        direction = rng.normal(size=model.size)
+        _, gradient, _ = evaluate_objective(
+            solver,
+            q_obs,
+            model,
+            parameters,
+            T_ref=450.0,
+            lam_q_mean=0.2,
+            lam_q_std=0.1,
+            lam_bottom=0.03,
+            lam_k=0.04,
+            lam_a=0.05,
+        )
 
-    def test_build_optimizer_and_reject_invalid_name(self) -> None:
-        param = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64))
-        self.assertIsInstance(_build_optimizer("adamw", [param], lr=0.1, weight_decay=0.0), torch.optim.AdamW)
-        self.assertIsInstance(_build_optimizer("lbfgs", [param], lr=0.1, weight_decay=0.0), torch.optim.LBFGS)
-        with self.assertRaises(ValueError):
-            _build_optimizer("sgd", [param], lr=0.1, weight_decay=0.0)
+        def objective(x: np.ndarray) -> float:
+            solver.clear_warm_start()
+            value, _, _ = evaluate_objective(
+                solver,
+                q_obs,
+                model,
+                x,
+                T_ref=450.0,
+                lam_q_mean=0.2,
+                lam_q_std=0.1,
+                lam_bottom=0.03,
+                lam_k=0.04,
+                lam_a=0.05,
+            )
+            return value
 
+        eps = 2e-6
+        finite_difference = (
+            objective(parameters + eps * direction)
+            - objective(parameters - eps * direction)
+        ) / (2.0 * eps)
+        np.testing.assert_allclose(gradient @ direction, finite_difference, rtol=3e-5, atol=2e-6)
 
-class FixedCoeffDirectModel(DirectParameterModel):
-    def __init__(self, ny: int, nx: int, bottom_coeff: torch.Tensor) -> None:
-        super().__init__(ny, nx, bottom_x=bottom_coeff.numel(), bottom_y=1, bottom_mode="dct", k_mode="fixed", a_mode="fixed")
-        self.fixed_bottom_coeff = bottom_coeff.to(dtype=torch.float64)
-
-    def forward(self, features: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
-        return {
-            "bottom_coeff": self.fixed_bottom_coeff,
-            "K_coeff": self._scaled_coeff(self.k_mode, None, self.k_property_scale, "K"),
-            "A_coeff": self._scaled_coeff(self.a_mode, None, self.a_property_scale, "A"),
-        }
-
-
-class RunInversionTest(unittest.TestCase):
-    def test_no_valid_observations_raise(self) -> None:
-        solver, _ = make_solver(ny=2, nx=2, nz=4)
-        model = DirectParameterModel(2, 2, bottom_mode="fixed", k_mode="fixed", a_mode="fixed")
-        with self.assertRaises(ValueError):
-            run_inversion(solver, np.full((2, 2), np.nan), model, verbose=False)
-
-    def test_fixed_model_evaluates_without_trainable_parameters(self) -> None:
-        solver, T_bot = make_solver(ny=2, nx=2, nz=4, bottom_temp=500.0)
-        baseline_T = solver.solve(T_bot)
-        q_obs = solver.surface_heat_flow_upward_np(baseline_T)
+    def test_lbfgsb_reduces_synthetic_misfit(self) -> None:
+        solver, truth_bottom = make_solver(
+            ny=2,
+            nx=2,
+            nz=5,
+            bottom_temp=540.0,
+            max_picard=10,
+            picard_tol=1e-12,
+            cg_rtol=1e-12,
+        )
+        q_obs = solver.surface_heat_flow(solver.solve(truth_bottom, reuse_last=False))
         solver.clear_warm_start()
-        model = DirectParameterModel(2, 2, bottom_mode="fixed", k_mode="fixed", a_mode="fixed")
-        out = run_inversion(solver, q_obs, model, T_ref=500.0, steps=1, optimizer_name="adamw", verbose=False)
-
-        self.assertGreaterEqual(len(out["history"]), 1)
-        self.assertTrue(np.isfinite(out["final_loss"]))
-        self.assertAlmostEqual(out["history"][-1]["data_misfit"], 0.5 * out["history"][-1]["rmse"] ** 2)
-        self.assertEqual(out["T"].shape, (2, 2, 4))
-        self.assertEqual(out["q_pred"].shape, (2, 2))
-        self.assertNotIn("parameterization", out)
-
-    def test_rejects_negative_coefficient_regularization_weights(self) -> None:
-        solver, _ = make_solver(ny=2, nx=2, nz=4)
-        model = DirectParameterModel(2, 2, bottom_mode="fixed", k_mode="fixed", a_mode="fixed")
-        with self.assertRaises(ValueError):
-            run_inversion(solver, np.ones((2, 2)), model, lam_alpha=-1.0, verbose=False)
-
-    def test_coefficient_regularization_contributes_to_loss(self) -> None:
-        solver, T_bot = make_solver(ny=2, nx=2, nz=4, bottom_temp=500.0)
-        baseline_T = solver.solve(T_bot)
-        q_obs = solver.surface_heat_flow_upward_np(baseline_T)
-        solver.clear_warm_start()
-        bottom_coeff = torch.tensor([2.0], dtype=torch.float64)
-        model = FixedCoeffDirectModel(2, 2, bottom_coeff)
-        out = run_inversion(solver, q_obs, model, T_ref=500.0, steps=0, optimizer_name="adamw", lam_alpha=3.0, verbose=False)
-        row = out["history"][-1]
-
-        self.assertAlmostEqual(row["alpha_reg"], 0.5 * 3.0 * 4.0)
-        self.assertAlmostEqual(row["coeff_reg"], row["alpha_reg"])
-        self.assertAlmostEqual(row["loss"], row["data_misfit"] + row["moment"] + row["coeff_reg"])
-        self.assertEqual(out["lam_alpha"], 3.0)
-        self.assertEqual(out["lam_k"], 0.0)
-        self.assertEqual(out["lam_a"], 0.0)
-
-    def test_one_step_adamw_direct_dct_bottom(self) -> None:
-        solver, T_bot = make_solver(ny=2, nx=2, nz=4, bottom_temp=500.0)
-        baseline_T = solver.solve(T_bot)
-        q_obs = solver.surface_heat_flow_upward_np(baseline_T)
-        solver.clear_warm_start()
-        model = DirectParameterModel(2, 2, bottom_x=1, bottom_y=1, bottom_mode="dct", k_mode="fixed", a_mode="fixed")
-        out = run_inversion(
+        model = DirectParameterization(
+            2,
+            2,
+            bottom_mode="dct",
+            k_mode="fixed",
+            a_mode="fixed",
+            bottom_dct_x=1,
+            bottom_dct_y=1,
+            bottom_bound_C=200.0,
+        )
+        result = run_inversion(
             solver,
             q_obs,
             model,
             T_ref=500.0,
-            steps=1,
-            lr=0.01,
-            optimizer_name="adamw",
-            history_every=1,
-            diagnose_gradients=True,
+            maxiter=12,
             verbose=False,
         )
 
-        self.assertGreaterEqual(len(out["history"]), 2)
-        self.assertTrue(np.isfinite(out["final_rmse"]))
-        self.assertEqual(out["alpha_bot"].shape, (1,))
-        self.assertEqual(out["valid_mask"].shape, (2, 2))
-        self.assertFalse(out["early_stopped"])
-        self.assertIn("grad_data_bottom", out["history"][-1])
+        self.assertLess(result["metrics"]["data_misfit"], result["history"][0]["data_misfit"] * 1e-6)
+        np.testing.assert_allclose(result["T_bot"], truth_bottom, atol=1e-4)
+        self.assertLessEqual(result["pde_evaluations"], result["optimization"]["function_evaluations"] + 1)
 
-    def test_early_stop_restores_best_model(self) -> None:
+    def test_fixed_model_is_evaluated_without_optimizer(self) -> None:
         solver, T_bot = make_solver(ny=2, nx=2, nz=4, bottom_temp=500.0)
-        baseline_T = solver.solve(T_bot)
-        q_obs = solver.surface_heat_flow_upward_np(baseline_T)
-        solver.clear_warm_start()
-        model = DirectParameterModel(2, 2, bottom_x=1, bottom_y=1, bottom_mode="dct", k_mode="fixed", a_mode="fixed")
-        out = run_inversion(
-            solver,
-            q_obs,
-            model,
-            T_ref=500.0,
-            steps=4,
-            lr=0.01,
-            optimizer_name="adamw",
-            history_every=1,
-            early_stop_patience=1,
-            early_stop_min_delta=1e9,
-            verbose=False,
+        q_obs = solver.surface_heat_flow(solver.solve(T_bot))
+        model = DirectParameterization(
+            2,
+            2,
+            bottom_mode="fixed",
+            k_mode="fixed",
+            a_mode="fixed",
         )
+        result = run_inversion(solver, q_obs, model, T_ref=500.0, verbose=False)
 
-        self.assertTrue(out["early_stopped"])
-        self.assertEqual(out["early_stop_step"], 1)
-        self.assertEqual(out["early_stop_best_step"], 0)
-        self.assertEqual(len(out["history"]), 2)
-        self.assertAlmostEqual(out["final_loss"], out["history"][0]["loss"])
+        self.assertEqual(result["parameters"].size, 0)
+        self.assertEqual(result["optimization"]["message"], "fixed model")
+        self.assertAlmostEqual(result["final_loss"], 0.0, places=12)
+
+
+class CheckpointTest(unittest.TestCase):
+    def test_npz_checkpoint_round_trip(self) -> None:
+        parameters = np.array([1.0, -2.0, 3.5])
+        metadata = {"format_version": 1, "data": {"t_ref": 1225.0}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.npz"
+            save_checkpoint(path, parameters, metadata)
+            loaded_parameters, loaded_metadata = load_checkpoint(path)
+
+        np.testing.assert_array_equal(loaded_parameters, parameters)
+        self.assertEqual(loaded_metadata, metadata)
 
 
 if __name__ == "__main__":
