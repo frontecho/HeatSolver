@@ -1,6 +1,16 @@
 # HeatSolver
 
-HeatSolver is a 3D steady-state geothermal inversion framework.
+HeatSolver is a PDE-constrained framework for three-dimensional steady-state
+geothermal inversion. It combines surface heat-flow observations, layered
+thermal properties, and optional multi-source geophysical features to constrain
+bottom temperature, thermal conductivity, and radiogenic heat production. The
+temperature field itself is always computed by the 3-D steady-state heat
+conduction solver.
+
+The Ordos Basin in the western North China Craton is included as [a case study](docs/final%20report.md).
+The example dataset and commands below prepare its regional grid and
+observations, run a parameterized inversion, and export the resulting
+temperature, property, and heat-flow fields for evaluation.
 
 ## Reproducing commands
 
