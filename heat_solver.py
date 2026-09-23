@@ -1,17 +1,22 @@
-"""Finite-volume solver for 3-D steady-state heat conduction."""
-
+"""Finite-volume heat conduction with prescribed vertical temperatures."""
 from __future__ import annotations
 
 import time
-
 import numpy as np
 import pyamg
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from scipy.linalg.lapack import dpttrf, dpttrs
+from scipy.sparse.linalg import cg, LinearOperator
 
 
 class HeatSolver:
-    """Solve ``-div(k(T) grad(T)) = A`` with vertical Dirichlet boundaries."""
+    """Solve ``-div(k(T) grad(T)) = A`` with vertical Dirichlet boundaries.
+
+    Frozen conductivity uses column-preconditioned CG. For the built-in
+    reciprocal temperature law, c_ref supplies its coefficients. Arbitrary
+    differentiable conductivity laws are handled by NonlinearHeatSolver.
+    """
 
     def __init__(
         self,
@@ -24,6 +29,8 @@ class HeatSolver:
         c_ref: np.ndarray,
         A_ref: np.ndarray,
         layer_masks: dict[str, np.ndarray] | None = None,
+        horizontal_scale: np.ndarray | None = None,
+        domain_mask: np.ndarray | None = None,
         max_picard: int = 20,
         picard_tol: float = 1e-6,
         cg_rtol: float = 1e-9,
@@ -48,6 +55,27 @@ class HeatSolver:
             raise ValueError("z_nodes_km must contain at least three nodes")
         if self.x.shape != (self.ny, self.nx) or self.y.shape != (self.ny, self.nx):
             raise ValueError("x, y, and surface_temp must have matching shapes")
+
+        # For a conformal map with projected length / physical length = h,
+        # multiply the physical PDE by the map-area Jacobian 1/h^2:
+        # div_xy(k grad_xy T) + d_z(k/h^2 d_z T) + A/h^2 = 0.
+        # h=1 retains the original Cartesian discretization exactly. Depth is
+        # physical depth; surface_heat_flow remains per physical square metre.
+        self.horizontal_scale = (np.ones_like(self.surface_temp) if horizontal_scale is None
+                                 else np.asarray(horizontal_scale, dtype=np.float64))
+        if (self.horizontal_scale.shape != self.surface_temp.shape or
+                not np.isfinite(self.horizontal_scale).all() or np.any(self.horizontal_scale <= 0)):
+            raise ValueError("horizontal_scale must be finite, positive and match the horizontal grid")
+        self.horizontal_area_factor = (1.0 / self.horizontal_scale**2)[:, :, None]
+        # Remove horizontal faces crossing the active domain. Inactive storage
+        # columns are decoupled vertical blocks, not an extrapolated model domain.
+        self.horizontal_face_y = self.horizontal_face_x = 1.0
+        if domain_mask is not None:
+            active = np.asarray(domain_mask)
+            if active.shape != self.surface_temp.shape or active.dtype != np.bool_ or not active.any():
+                raise ValueError("domain_mask must be a nonempty boolean horizontal mask")
+            self.horizontal_face_y = (active[:-1] & active[1:])[..., None]
+            self.horizontal_face_x = (active[:, :-1] & active[:, 1:])[..., None]
 
         self.field_shape = (self.ny, self.nx, self.nz)
         for name, field in (
@@ -166,9 +194,9 @@ class HeatSolver:
         T_bot: np.ndarray,
     ) -> tuple[sp.csr_matrix, np.ndarray]:
         k = self._conductivity_from_temperature(K0, self.c_ref, T)
-        face_z = self._harmonic_mean(k[:, :, :-1], k[:, :, 1:])
-        face_y = self._harmonic_mean(k[:-1, :, :], k[1:, :, :])
-        face_x = self._harmonic_mean(k[:, :-1, :], k[:, 1:, :])
+        face_z = self._harmonic_mean(k[:, :, :-1], k[:, :, 1:]) * self.horizontal_area_factor
+        face_y = self._harmonic_mean(k[:-1, :, :], k[1:, :, :]) * self.horizontal_face_y
+        face_x = self._harmonic_mean(k[:, :-1, :], k[:, 1:, :]) * self.horizontal_face_x
         nz2 = self.nz - 2
 
         czm = face_z[:, :, :-1] / self.dz**2
@@ -199,7 +227,7 @@ class HeatSolver:
             shape=(self._n_unknowns, self._n_unknowns),
         )
 
-        rhs = A_source[:, :, 1:-1].ravel().copy()
+        rhs = (A_source[:, :, 1:-1] * self.horizontal_area_factor).ravel().copy()
         rhs[self._surface_rows] += (czm[:, :, 0] * self.surface_temp).ravel()
         rhs[self._bottom_rows] += (czp[:, :, -1] * T_bot).ravel()
         return matrix, rhs
@@ -232,6 +260,8 @@ class HeatSolver:
         T_init: np.ndarray | None = None,
         reuse_last: bool = True,
     ) -> np.ndarray:
+        if not np.any(self.c_ref):
+            return self._solve_linear(T_bot,K0,A_source,T_init=T_init,reuse_last=reuse_last)
         T_bot = np.asarray(T_bot, dtype=np.float64)
         K0 = self.K0_ref if K0 is None else np.asarray(K0, dtype=np.float64)
         A_source = self.A_ref if A_source is None else np.asarray(A_source, dtype=np.float64)
@@ -328,6 +358,7 @@ class HeatSolver:
         grad_K0: np.ndarray | None,
         axis: int,
         spacing: float,
+        face_weight: np.ndarray | float = 1.0,
     ) -> None:
         left = [slice(None)] * 3
         right = [slice(None)] * 3
@@ -343,11 +374,11 @@ class HeatSolver:
         delta_v = v[left_index] - v[right_index]
         delta_T = T[left_index] - T[right_index]
 
-        direct = delta_v * harmonic / spacing**2
+        direct = delta_v * harmonic * face_weight / spacing**2
         grad_T[left_index] += direct
         grad_T[right_index] -= direct
 
-        common = delta_v * delta_T / spacing**2
+        common = delta_v * delta_T * face_weight / spacing**2
         grad_ka = common * (2.0 * kb**2 / denominator)
         grad_kb = common * (2.0 * ka**2 / denominator)
         grad_T[left_index] += grad_ka * dk_dT[left_index]
@@ -369,9 +400,12 @@ class HeatSolver:
         v[:, :, 1:-1] = vector.reshape(self.ny, self.nx, self.nz - 2)
         grad_T = np.zeros_like(T)
         grad_K0 = None if dk_dK0 is None else np.zeros_like(T)
-        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 2, self.dz)
-        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 0, self.dy)
-        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 1, self.dx)
+        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 2, self.dz,
+                           self.horizontal_area_factor)
+        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 0, self.dy,
+                           self.horizontal_face_y)
+        self._add_face_vjp(T, k, dk_dT, dk_dK0, v, grad_T, grad_K0, 1, self.dx,
+                           self.horizontal_face_x)
         return grad_T, grad_K0
 
     def _output_vjp(
@@ -418,6 +452,8 @@ class HeatSolver:
         grad_q: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Differentiate an output-weighted scalar with one nonlinear adjoint solve."""
+        if not np.any(self.c_ref):
+            return self._linear_adjoint_gradient(T,K0,grad_T=grad_T,grad_q=grad_q)
         direct_T, direct_K0 = self._output_vjp(T, K0, grad_T, grad_q)
         rhs = direct_T[:, :, 1:-1].ravel()
         k, dk_dT, dk_dK0 = self._conductivity_terms(K0, self.c_ref, T)
@@ -461,7 +497,75 @@ class HeatSolver:
         grad_T_bot = direct_T[:, :, -1] - residual_grad_T[:, :, -1]
         grad_K0 = direct_K0 - residual_grad_K0
         grad_A = np.zeros_like(T)
-        grad_A[:, :, 1:-1] = adjoint.reshape(self.ny, self.nx, self.nz - 2)
+        grad_A[:, :, 1:-1] = (adjoint.reshape(self.ny, self.nx, self.nz - 2) *
+                             self.horizontal_area_factor)
         if self.last_solve_info is not None:
             self.last_solve_info["adjoint_iterations"] = adjoint_iterations
         return grad_T_bot, grad_K0, grad_A
+
+
+    def _solve_linear(self,T_bot,K0=None,A_source=None,*,T_init=None,reuse_last=True):
+        start=time.perf_counter()
+        K0=self.K0_ref if K0 is None else np.asarray(K0,dtype=float)
+        A_source=self.A_ref if A_source is None else np.asarray(A_source,dtype=float)
+        T_bot=np.asarray(T_bot,dtype=float)
+        if T_bot.shape!=(self.ny,self.nx) or K0.shape!=self.field_shape or A_source.shape!=self.field_shape:
+            raise ValueError('boundary/property shape mismatch')
+        T=np.zeros(self.field_shape)
+        T[:,:,0]=self.surface_temp;T[:,:,-1]=T_bot
+        matrix,rhs=self._build_matrix_and_rhs(K0,A_source,T,T_bot)
+        # z is the contiguous array dimension. Keep the exact within-column block,
+        # including the diagonal contribution of horizontal faces. All horizontal
+        # couplings remain in the full matrix used by CG, not dropped from the PDE.
+        # A positive tridiagonal LDL factorization needs two arrays, avoiding sparse
+        # LU symbolic/fill workspaces. Z-column boundaries have zero off-diagonals.
+        diagonal,off_diagonal,info=dpttrf(matrix.diagonal(),matrix.diagonal(-1))
+        if info!=0:
+            raise RuntimeError(f'vertical block LDL factorization failed: {info}')
+        def apply(vector):
+            result,info=dpttrs(diagonal,off_diagonal,np.asarray(vector)[:,None])
+            if info!=0:
+                raise RuntimeError(f'vertical block LDL solve failed: {info}')
+            return result[:,0]
+        self._preconditioner=LinearOperator(matrix.shape,matvec=apply,dtype=float)
+        initial=T_init if T_init is not None else self._last_T if reuse_last else None
+        if initial is not None and np.shape(initial)!=self.field_shape:
+            raise ValueError('initial temperature shape mismatch')
+        x0=None if initial is None else initial[:,:,1:-1].ravel()
+        iterations=0
+        def count(_):
+            nonlocal iterations
+            iterations+=1
+        interior,info=cg(matrix,rhs,x0=x0,M=self._preconditioner,rtol=self.cg_rtol,maxiter=500,callback=count)
+        if info!=0:
+            raise RuntimeError(f'column-preconditioned CG failed: {info}')
+        T[:,:,1:-1]=interior.reshape(self.ny,self.nx,self.nz-2)
+        self._last_T=T.copy();self._solve_calls+=1
+        residual=float(np.linalg.norm(matrix@interior-rhs)/np.linalg.norm(rhs))
+        self.last_solve_info=dict(solve_id=self._solve_calls,picard_iterations=1,cg_iterations=iterations,
+            relative_change=0.,linear_relative_residual=residual,elapsed_s=time.perf_counter()-start,
+            linear_solver='full_3D_CG_with_exact_vertical_column_blocks')
+        return T
+
+
+    def _linear_adjoint_gradient(self,T,K0,*,grad_T=None,grad_q=None):
+        direct_T,direct_K0=self._output_vjp(T,K0,grad_T,grad_q)
+        rhs=direct_T[:,:,1:-1].ravel()
+        k,dk_dT,dk_dK0=self._conductivity_terms(K0,self.c_ref,T)
+        iterations=0
+        if np.any(rhs):
+            # At c=0 the residual Jacobian is exactly the symmetric FV matrix.
+            matrix,_=self._build_matrix_and_rhs(K0,np.zeros_like(T),T,T[:,:,-1])
+            def count(_):
+                nonlocal iterations
+                iterations+=1
+            adjoint,info=cg(matrix,rhs,M=self._preconditioner,rtol=self.cg_rtol,maxiter=500,callback=count)
+            if info!=0:
+                raise RuntimeError(f'linear adjoint CG failed: {info}')
+        else:
+            adjoint=np.zeros(self._n_unknowns)
+        residual_T,residual_K=self._residual_vjp(T,adjoint,k,dk_dT,dk_dK0)
+        gA=np.zeros_like(T)
+        gA[:,:,1:-1]=adjoint.reshape(self.ny,self.nx,self.nz-2)*self.horizontal_area_factor
+        self.last_solve_info['adjoint_iterations']=iterations
+        return direct_T[:,:,-1]-residual_T[:,:,-1],direct_K0-residual_K,gA

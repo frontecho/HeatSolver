@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from heat_solver import HeatSolver
-from lithosphere_model import THERMAL_LAYER_NAMES
+from experiments.model import THERMAL_LAYER_NAMES
 
 
 def make_layer_masks(ny: int, nx: int, nz: int) -> dict[str, np.ndarray]:
