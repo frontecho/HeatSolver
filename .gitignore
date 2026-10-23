@@ -1,0 +1,17 @@
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+.venv/
+.uv-cache/
+.pytest_cache/
+.tools/
+.vscode/
+
+legacy/
+tmp/
+
+inputs/
+results/
+paper/

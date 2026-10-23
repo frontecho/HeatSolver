@@ -1,0 +1,27 @@
+[project]
+name = "heatsolver"
+version = "0.1.0"
+description = "PDE-constrained geothermal inversion for the North China Craton"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "h5py>=3.12",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "openpyxl>=3.1",
+    "pandas>=3.0.2",
+    "pyogrio>=0.13.0",
+    "pyproj>=3.7",
+    "rasterio>=1.4",
+    "scipy>=1.17.1",
+    "shapely>=2.1",
+    "xlrd>=2.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.0.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["."]
+addopts = "-p no:cacheprovider --import-mode=importlib --basetemp=tmp/pytest"
